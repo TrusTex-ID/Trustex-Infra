@@ -27,6 +27,18 @@ terraform.rc
 *.tfplan
 *.plan
 
+# ---------------------------------------------------------------------------
+# Secrets: plaintext + private age key stay local.
+# Encrypted *.age, public key, examples and README are committed.
+# ---------------------------------------------------------------------------
+terraform/secrets/.age.key
+terraform/secrets/*
+!terraform/secrets/.gitkeep
+!terraform/secrets/.age.pubkey
+!terraform/secrets/*.age
+!terraform/secrets/*.example
+!terraform/secrets/README.md
+
 # OS / editor
 .DS_Store
 .idea/
