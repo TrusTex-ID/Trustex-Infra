@@ -1,20 +1,28 @@
 project_id  = "your-gcp-project-id"
-region      = "europe-southwest1"
 environment = "dev"
 
-# After first apply, push images and set these (or re-apply with new values):
-# frontend_image = "europe-southwest1-docker.pkg.dev/your-gcp-project-id/trustex/frontend:latest"
-# backend_image  = "europe-southwest1-docker.pkg.dev/your-gcp-project-id/trustex/backend:latest"
-# java_image     = "europe-southwest1-docker.pkg.dev/your-gcp-project-id/trustex/java:latest"
+region = "europe-west1"
+zone   = "europe-west1-b"
 
-# Budget defaults (keep these for ~$20–25/month target):
-# db_tier                  = "db-f1-micro"
-# cloud_run_min_instances  = 0
-# enable_load_balancer     = false
+debug = false
 
-# Optional custom domain (free managed SSL via Cloud Run domain mapping):
-# frontend_custom_domain = "app.example.com"
+frontend_tag = "0.40.0"
+backend_tag  = "0.55.0"
+java_tag     = "0.55.0"
 
-# Only enable if you accept ~+$18/month for a Global HTTPS LB:
+# --- Primer apply -----------------------------------------------------------
+# El registry esta vacio hasta que subas las imagenes, asi que el primer apply
+# fallaria al no encontrar los tags. Descomenta esto para arrancar con el
+# contenedor de prueba de Cloud Run, y vuelve a comentarlo tras el primer push.
+#
+# frontend_image = "us-docker.pkg.dev/cloudrun/container/hello"
+# backend_image  = "us-docker.pkg.dev/cloudrun/container/hello"
+# java_image     = "us-docker.pkg.dev/cloudrun/container/hello"
+
+# --- Dominio propio (gratis, sin balanceador) -------------------------------
+# Solo disponible en ciertas regiones; europe-west1 es una de ellas.
+# frontend_custom_domain = "app.trustex.com"
+
+# --- Balanceador global (+~18 $/mes, se sale del presupuesto) ---------------
 # enable_load_balancer = true
-# lb_domains           = ["app.example.com"]
+# lb_domains           = ["app.trustex.com"]

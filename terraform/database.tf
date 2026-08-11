@@ -14,15 +14,21 @@ resource "google_sql_database_instance" "main" {
   deletion_protection = var.environment == "prod"
 
   settings {
-    tier              = var.db_tier
-    edition           = var.db_edition
-    availability_type = "ZONAL"
-    disk_type         = var.db_disk_type
-    disk_size         = var.db_disk_size_gb
+    # Fixed budget profile (~$8–12/month). Change here if you need more capacity.
+    tier              = "db-f1-micro" # shared-core, ~0.6 GB RAM
+    edition           = "ENTERPRISE"  # required for db-f1-micro
+    availability_type = "ZONAL"      # no HA replica
+    disk_type         = "PD_HDD"
+    disk_size         = 10 # GB
     disk_autoresize   = false
+    pricing_plan      = "PER_USE"
 
-    # Prefer low cost over always-on CPU credits.
-    pricing_plan = "PER_USE"
+    dynamic "location_preference" {
+      for_each = var.zone != "" ? [var.zone] : []
+      content {
+        zone = location_preference.value
+      }
+    }
 
     ip_configuration {
       ipv4_enabled = true
@@ -32,7 +38,7 @@ resource "google_sql_database_instance" "main" {
     }
 
     backup_configuration {
-      enabled                        = var.enable_db_backups
+      enabled                        = true
       start_time                     = "03:00"
       point_in_time_recovery_enabled = false
       backup_retention_settings {
@@ -55,16 +61,24 @@ resource "google_sql_database_instance" "main" {
     user_labels = local.common_labels
   }
 
-  depends_on = [google_project_service.services]
+  depends_on = [time_sleep.api_propagation]
 }
 
 resource "google_sql_database" "app" {
-  name     = var.db_name
+  # Prefer values from terraform/secrets/postgres so Cloud SQL and Cloud Run stay aligned.
+  name     = lookup(local.secrets_postgres, "DB_NAME", "trustex")
   instance = google_sql_database_instance.main.name
 }
 
 resource "google_sql_user" "app" {
-  name     = var.db_user
+  name     = lookup(local.secrets_postgres, "DB_USER", "trustex")
   instance = google_sql_database_instance.main.name
-  password = random_password.db.result
+  password = lookup(local.secrets_postgres, "DB_PASSWORD", null)
+
+  lifecycle {
+    precondition {
+      condition     = lookup(local.secrets_postgres, "DB_PASSWORD", "") != ""
+      error_message = "terraform/secrets/postgres must define DB_PASSWORD before creating the Cloud SQL user. Run `make secrets-decrypt` and set it."
+    }
+  }
 }

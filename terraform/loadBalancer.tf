@@ -115,6 +115,9 @@ resource "google_compute_url_map" "main" {
   }
 }
 
+# The three resources below reference no other resource, so they need an explicit
+# dependency on compute.googleapis.com being usable. The rest of the load
+# balancer reaches it transitively through the Cloud Run services and NEGs.
 resource "google_compute_managed_ssl_certificate" "main" {
   count = local.lb_enabled && length(var.lb_domains) > 0 ? 1 : 0
 
@@ -123,6 +126,8 @@ resource "google_compute_managed_ssl_certificate" "main" {
   managed {
     domains = var.lb_domains
   }
+
+  depends_on = [time_sleep.api_propagation]
 }
 
 resource "google_compute_target_https_proxy" "main" {
@@ -137,6 +142,8 @@ resource "google_compute_global_address" "lb" {
   count = local.lb_enabled ? 1 : 0
 
   name = "${local.name_prefix}-lb-ip"
+
+  depends_on = [time_sleep.api_propagation]
 }
 
 resource "google_compute_global_forwarding_rule" "https" {
@@ -161,6 +168,8 @@ resource "google_compute_url_map" "http_redirect" {
     redirect_response_code = "MOVED_PERMANENTLY_DEFAULT"
     strip_query            = false
   }
+
+  depends_on = [time_sleep.api_propagation]
 }
 
 resource "google_compute_target_http_proxy" "redirect" {

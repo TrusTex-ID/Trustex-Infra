@@ -1,6 +1,6 @@
 resource "google_artifact_registry_repository" "main" {
   location      = var.region
-  repository_id = var.artifact_registry_repository_id
+  repository_id = local.artifact_registry_repository_id
   description   = "Docker images for Trustex Cloud Run services (frontend, backend, java)."
   format        = "DOCKER"
   labels        = local.common_labels
@@ -27,5 +27,5 @@ resource "google_artifact_registry_repository" "main" {
     }
   }
 
-  depends_on = [google_project_service.services]
+  depends_on = [time_sleep.api_propagation]
 }

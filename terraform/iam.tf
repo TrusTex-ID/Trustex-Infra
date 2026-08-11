@@ -1,18 +1,26 @@
 # Runtime service accounts for each Cloud Run service (least privilege).
 
+# These only reference variables, so nothing links them to iam.googleapis.com.
+# Without depends_on they can be created before that API is usable.
 resource "google_service_account" "frontend" {
-  account_id   = "${var.name_prefix}-${var.environment}-fe"
+  account_id   = "${local.name_prefix}-fe"
   display_name = "Trustex frontend Cloud Run (${var.environment})"
+
+  depends_on = [time_sleep.api_propagation]
 }
 
 resource "google_service_account" "backend" {
-  account_id   = "${var.name_prefix}-${var.environment}-be"
+  account_id   = "${local.name_prefix}-be"
   display_name = "Trustex Node.js backend Cloud Run (${var.environment})"
+
+  depends_on = [time_sleep.api_propagation]
 }
 
 resource "google_service_account" "java" {
-  account_id   = "${var.name_prefix}-${var.environment}-java"
+  account_id   = "${local.name_prefix}-java"
   display_name = "Trustex Java Cloud Run (${var.environment})"
+
+  depends_on = [time_sleep.api_propagation]
 }
 
 # Cloud SQL Client — needed for the Cloud Run ↔ Cloud SQL Unix socket connector.
@@ -26,19 +34,6 @@ resource "google_project_iam_member" "java_cloudsql_client" {
   project = var.project_id
   role    = "roles/cloudsql.client"
   member  = "serviceAccount:${google_service_account.java.email}"
-}
-
-# Secret access for DB password (backend + java only).
-resource "google_secret_manager_secret_iam_member" "backend_db_password" {
-  secret_id = google_secret_manager_secret.db_password.id
-  role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.backend.email}"
-}
-
-resource "google_secret_manager_secret_iam_member" "java_db_password" {
-  secret_id = google_secret_manager_secret.db_password.id
-  role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.java.email}"
 }
 
 # Allow Cloud Run to pull images from Artifact Registry.

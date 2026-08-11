@@ -6,7 +6,19 @@ variable "project_id" {
 variable "region" {
   description = "Primary GCP region for regional resources."
   type        = string
-  default     = "europe-southwest1" # Madrid — usually cheaper egress for EU users
+  default     = "europe-west1" # Belgium — one of the regions with Cloud Run domain mapping
+}
+
+variable "zone" {
+  description = "Zone used to pin the zonal Cloud SQL instance. Empty lets GCP choose."
+  type        = string
+  default     = ""
+}
+
+variable "debug" {
+  description = "Injects DEBUG=true into the Cloud Run services. The secrets files can override it."
+  type        = bool
+  default     = false
 }
 
 variable "environment" {
@@ -15,160 +27,49 @@ variable "environment" {
   default     = "dev"
 }
 
-variable "name_prefix" {
-  description = "Prefix for all resource names."
-  type        = string
-  default     = "trustex"
-}
-
 # ---------------------------------------------------------------------------
-# Artifact Registry
+# Cloud Run images
 # ---------------------------------------------------------------------------
 
-variable "artifact_registry_repository_id" {
-  description = "Artifact Registry repository ID for container images."
+# Image tags are the normal way to pick a version: the Artifact Registry path is
+# derived from project_id, region and the fixed repository name. Set the *_image
+# override only to point at an image outside this registry (for example the
+# Cloud Run hello placeholder on the very first apply, when the repo is empty).
+
+variable "frontend_tag" {
+  description = "Image tag for the Next.js frontend in Artifact Registry."
   type        = string
-  default     = "trustex"
+  default     = "latest"
 }
 
-# ---------------------------------------------------------------------------
-# Cloud SQL (budget-oriented defaults)
-# ---------------------------------------------------------------------------
-
-variable "db_tier" {
-  description = "Cloud SQL machine tier. db-f1-micro keeps monthly cost low."
+variable "backend_tag" {
+  description = "Image tag for the Node.js backend in Artifact Registry."
   type        = string
-  default     = "db-f1-micro"
+  default     = "latest"
 }
 
-variable "db_disk_size_gb" {
-  description = "Cloud SQL disk size in GB. Keep small for budget."
-  type        = number
-  default     = 10
-}
-
-variable "db_disk_type" {
-  description = "Cloud SQL disk type. PD_HDD is cheaper than PD_SSD."
+variable "java_tag" {
+  description = "Image tag for the Spring Boot service in Artifact Registry."
   type        = string
-  default     = "PD_HDD"
+  default     = "latest"
 }
-
-variable "db_name" {
-  description = "Application database name."
-  type        = string
-  default     = "trustex"
-}
-
-variable "db_user" {
-  description = "Application database user."
-  type        = string
-  default     = "trustex"
-}
-
-variable "db_edition" {
-  description = "Cloud SQL edition. ENTERPRISE is required for db-f1-micro."
-  type        = string
-  default     = "ENTERPRISE"
-}
-
-variable "enable_db_backups" {
-  description = "Enable automated Cloud SQL backups (small storage cost)."
-  type        = bool
-  default     = true
-}
-
-# ---------------------------------------------------------------------------
-# Cloud Run images & runtime
-# ---------------------------------------------------------------------------
 
 variable "frontend_image" {
-  description = "Container image for the Next.js frontend. Defaults to a hello placeholder until you push your image."
+  description = "Full image override for the frontend. Empty means build it from frontend_tag."
   type        = string
-  default     = "us-docker.pkg.dev/cloudrun/container/hello"
+  default     = ""
 }
 
 variable "backend_image" {
-  description = "Container image for the Node.js backend. Defaults to a hello placeholder until you push your image."
+  description = "Full image override for the backend. Empty means build it from backend_tag."
   type        = string
-  default     = "us-docker.pkg.dev/cloudrun/container/hello"
+  default     = ""
 }
 
 variable "java_image" {
-  description = "Container image for the Spring Boot service. Defaults to a hello placeholder until you push your image."
+  description = "Full image override for the Java service. Empty means build it from java_tag."
   type        = string
-  default     = "us-docker.pkg.dev/cloudrun/container/hello"
-}
-
-variable "cloud_run_min_instances" {
-  description = "Minimum Cloud Run instances. 0 enables scale-to-zero (required for the budget)."
-  type        = number
-  default     = 0
-}
-
-variable "cloud_run_max_instances" {
-  description = "Maximum Cloud Run instances per service."
-  type        = number
-  default     = 2
-}
-
-variable "frontend_cpu" {
-  description = "vCPU for the frontend Cloud Run service."
-  type        = string
-  default     = "1"
-}
-
-variable "frontend_memory" {
-  description = "Memory for the frontend Cloud Run service."
-  type        = string
-  default     = "512Mi"
-}
-
-variable "backend_cpu" {
-  description = "vCPU for the Node.js backend Cloud Run service."
-  type        = string
-  default     = "1"
-}
-
-variable "backend_memory" {
-  description = "Memory for the Node.js backend Cloud Run service."
-  type        = string
-  default     = "512Mi"
-}
-
-variable "java_cpu" {
-  description = "vCPU for the Java Cloud Run service."
-  type        = string
-  default     = "1"
-}
-
-variable "java_memory" {
-  description = "Memory for the Java Cloud Run service. Spring Boot usually needs more RAM."
-  type        = string
-  default     = "1Gi"
-}
-
-variable "frontend_port" {
-  description = "Container port for the frontend service."
-  type        = number
-  default     = 3000
-}
-
-variable "backend_port" {
-  description = "Container port for the Node.js backend."
-  type        = number
-  default     = 8080
-}
-
-variable "java_port" {
-  description = "Container port for the Spring Boot service."
-  type        = number
-  default     = 8080
-}
-
-variable "allow_unauthenticated" {
-  description = "If true, Cloud Run services are publicly invokable (typical for a web app)."
-  type        = bool
-  default     = true
+  default     = ""
 }
 
 # ---------------------------------------------------------------------------
@@ -199,10 +100,4 @@ variable "lb_domains" {
   description = "Domains for the managed SSL certificate when the load balancer is enabled."
   type        = list(string)
   default     = []
-}
-
-variable "labels" {
-  description = "Common labels applied to supported resources."
-  type        = map(string)
-  default     = {}
 }

@@ -16,7 +16,7 @@ resource "google_cloud_run_domain_mapping" "frontend" {
 
   metadata {
     namespace = var.project_id
-    labels  = local.common_labels
+    labels    = local.common_labels
   }
 
   spec {

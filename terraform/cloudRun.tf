@@ -1,5 +1,6 @@
 # Three Cloud Run services with scale-to-zero (min_instances = 0) to stay
 # within the ~$20–25/month budget. HTTPS is provided automatically on *.run.app.
+# CPU / memory / ports / scaling are fixed here — change them in this file.
 
 resource "google_cloud_run_v2_service" "frontend" {
   name     = "${local.name_prefix}-frontend"
@@ -11,21 +12,21 @@ resource "google_cloud_run_v2_service" "frontend" {
     service_account = google_service_account.frontend.email
 
     scaling {
-      min_instance_count = var.cloud_run_min_instances
-      max_instance_count = var.cloud_run_max_instances
+      min_instance_count = 0
+      max_instance_count = 2
     }
 
     containers {
-      image = var.frontend_image
+      image = local.frontend_image
 
       ports {
-        container_port = var.frontend_port
+        container_port = 3000
       }
 
       resources {
         limits = {
-          cpu    = var.frontend_cpu
-          memory = var.frontend_memory
+          cpu    = "1"
+          memory = "512Mi"
         }
         cpu_idle          = true
         startup_cpu_boost = true
@@ -45,6 +46,14 @@ resource "google_cloud_run_v2_service" "frontend" {
         name  = "JAVA_URL"
         value = google_cloud_run_v2_service.java.uri
       }
+
+      dynamic "env" {
+        for_each = local.frontend_service_env
+        content {
+          name  = env.key
+          value = env.value
+        }
+      }
     }
   }
 
@@ -53,7 +62,13 @@ resource "google_cloud_run_v2_service" "frontend" {
     percent = 100
   }
 
-  depends_on = [google_project_service.services]
+  # The image lives in Artifact Registry and the runtime SA needs the reader role
+  # before the revision can pull it. Neither is referenced in the config above.
+  depends_on = [
+    time_sleep.api_propagation,
+    google_artifact_registry_repository.main,
+    google_project_iam_member.frontend_ar_reader,
+  ]
 }
 
 resource "google_cloud_run_v2_service" "backend" {
@@ -66,8 +81,8 @@ resource "google_cloud_run_v2_service" "backend" {
     service_account = google_service_account.backend.email
 
     scaling {
-      min_instance_count = var.cloud_run_min_instances
-      max_instance_count = var.cloud_run_max_instances
+      min_instance_count = 0
+      max_instance_count = 2
     }
 
     # Built-in Cloud SQL connector (Unix socket at /cloudsql/INSTANCE)
@@ -79,16 +94,16 @@ resource "google_cloud_run_v2_service" "backend" {
     }
 
     containers {
-      image = var.backend_image
+      image = local.backend_image
 
       ports {
-        container_port = var.backend_port
+        container_port = 8080
       }
 
       resources {
         limits = {
-          cpu    = var.backend_cpu
-          memory = var.backend_memory
+          cpu    = "1"
+          memory = "512Mi"
         }
         cpu_idle          = true
         startup_cpu_boost = true
@@ -99,44 +114,13 @@ resource "google_cloud_run_v2_service" "backend" {
         mount_path = "/cloudsql"
       }
 
-      env {
-        name  = "NODE_ENV"
-        value = var.environment == "prod" ? "production" : "development"
-      }
-
-      env {
-        name  = "DB_HOST"
-        value = "/cloudsql/${local.cloudsql_connection_name}"
-      }
-
-      env {
-        name  = "DB_NAME"
-        value = var.db_name
-      }
-
-      env {
-        name  = "DB_USER"
-        value = var.db_user
-      }
-
-      env {
-        name  = "INSTANCE_CONNECTION_NAME"
-        value = local.cloudsql_connection_name
-      }
-
-      env {
-        name = "DB_PASSWORD"
-        value_source {
-          secret_key_ref {
-            secret  = google_secret_manager_secret.db_password.secret_id
-            version = "latest"
-          }
+      # All env vars come from terraform/secrets/{postgres,backend}.
+      dynamic "env" {
+        for_each = local.backend_service_env
+        content {
+          name  = env.key
+          value = env.value
         }
-      }
-
-      env {
-        name  = "JAVA_SERVICE_URL"
-        value = google_cloud_run_v2_service.java.uri
       }
     }
   }
@@ -146,10 +130,16 @@ resource "google_cloud_run_v2_service" "backend" {
     percent = 100
   }
 
+  # A revision is only healthy once it can pull its image and reach the database,
+  # so the roles, the schema and the DB user must all exist first. None of them
+  # are referenced in the config above, hence the explicit list.
   depends_on = [
-    google_project_service.services,
-    google_secret_manager_secret_version.db_password,
-    google_sql_database_instance.main,
+    time_sleep.api_propagation,
+    google_artifact_registry_repository.main,
+    google_project_iam_member.backend_ar_reader,
+    google_project_iam_member.backend_cloudsql_client,
+    google_sql_database.app,
+    google_sql_user.app,
   ]
 }
 
@@ -163,8 +153,8 @@ resource "google_cloud_run_v2_service" "java" {
     service_account = google_service_account.java.email
 
     scaling {
-      min_instance_count = var.cloud_run_min_instances
-      max_instance_count = var.cloud_run_max_instances
+      min_instance_count = 0
+      max_instance_count = 2
     }
 
     volumes {
@@ -175,16 +165,16 @@ resource "google_cloud_run_v2_service" "java" {
     }
 
     containers {
-      image = var.java_image
+      image = local.java_image
 
       ports {
-        container_port = var.java_port
+        container_port = 8080
       }
 
       resources {
         limits = {
-          cpu    = var.java_cpu
-          memory = var.java_memory
+          cpu    = "1"
+          memory = "1Gi"
         }
         cpu_idle          = true
         startup_cpu_boost = true
@@ -195,34 +185,13 @@ resource "google_cloud_run_v2_service" "java" {
         mount_path = "/cloudsql"
       }
 
-      env {
-        name  = "SPRING_PROFILES_ACTIVE"
-        value = var.environment
-      }
-
-      env {
-        name  = "SPRING_DATASOURCE_URL"
-        value = "jdbc:postgresql:///${var.db_name}?cloudSqlInstance=${local.cloudsql_connection_name}&socketFactory=com.google.cloud.sql.postgres.SocketFactory"
-      }
-
-      env {
-        name  = "SPRING_DATASOURCE_USERNAME"
-        value = var.db_user
-      }
-
-      env {
-        name = "SPRING_DATASOURCE_PASSWORD"
-        value_source {
-          secret_key_ref {
-            secret  = google_secret_manager_secret.db_password.secret_id
-            version = "latest"
-          }
+      # All env vars come from terraform/secrets/postgres.
+      dynamic "env" {
+        for_each = local.java_service_env
+        content {
+          name  = env.key
+          value = env.value
         }
-      }
-
-      env {
-        name  = "INSTANCE_CONNECTION_NAME"
-        value = local.cloudsql_connection_name
       }
     }
   }
@@ -233,16 +202,17 @@ resource "google_cloud_run_v2_service" "java" {
   }
 
   depends_on = [
-    google_project_service.services,
-    google_secret_manager_secret_version.db_password,
-    google_sql_database_instance.main,
+    time_sleep.api_propagation,
+    google_artifact_registry_repository.main,
+    google_project_iam_member.java_ar_reader,
+    google_project_iam_member.java_cloudsql_client,
+    google_sql_database.app,
+    google_sql_user.app,
   ]
 }
 
-# Public invokers (optional). Required for a browser-facing frontend.
+# Public invokers — browser-facing app.
 resource "google_cloud_run_v2_service_iam_member" "frontend_public" {
-  count = var.allow_unauthenticated ? 1 : 0
-
   project  = google_cloud_run_v2_service.frontend.project
   location = google_cloud_run_v2_service.frontend.location
   name     = google_cloud_run_v2_service.frontend.name
@@ -251,8 +221,6 @@ resource "google_cloud_run_v2_service_iam_member" "frontend_public" {
 }
 
 resource "google_cloud_run_v2_service_iam_member" "backend_public" {
-  count = var.allow_unauthenticated ? 1 : 0
-
   project  = google_cloud_run_v2_service.backend.project
   location = google_cloud_run_v2_service.backend.location
   name     = google_cloud_run_v2_service.backend.name
@@ -261,8 +229,6 @@ resource "google_cloud_run_v2_service_iam_member" "backend_public" {
 }
 
 resource "google_cloud_run_v2_service_iam_member" "java_public" {
-  count = var.allow_unauthenticated ? 1 : 0
-
   project  = google_cloud_run_v2_service.java.project
   location = google_cloud_run_v2_service.java.location
   name     = google_cloud_run_v2_service.java.name
