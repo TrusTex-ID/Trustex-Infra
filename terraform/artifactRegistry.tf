@@ -1,7 +1,7 @@
 resource "google_artifact_registry_repository" "main" {
   location      = var.region
   repository_id = local.artifact_registry_repository_id
-  description   = "Docker images for Trustex Cloud Run services (frontend, backend, java)."
+  description   = "Docker images for Trustex: frontend, backend, dss and the setup job."
   format        = "DOCKER"
   labels        = local.common_labels
 

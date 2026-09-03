@@ -20,3 +20,10 @@ Include other services you consider imprescindible like load balancer, SSL certi
 
 - Must have clear files separation for each config type in Terraform. For example one cloudRun.tf for cloudRun config, database.tf for database config and so on.
 
+# Commits
+
+Never use co-authored by claude.
+Always use standard commits rules:
+- feat
+- fix
+- docs

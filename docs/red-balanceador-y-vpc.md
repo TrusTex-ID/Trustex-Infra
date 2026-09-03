@@ -3,7 +3,7 @@
 Documento de decisión para la infraestructura de `terraform/`. Responde a dos preguntas:
 
 1. ¿Qué influye tener un load balancer y por qué ahora está desactivado?
-2. Los backends de Node y Java deben hablarse entre ellos, ¿interesa meter una VPC? ¿Tiene coste?
+2. El backend de Node y el servicio DSS deben hablarse entre ellos, ¿interesa meter una VPC? ¿Tiene coste?
 
 Presupuesto objetivo del proyecto: **20–25 $/mes**. Ese límite es el que decide casi todo lo que viene a continuación.
 
@@ -27,11 +27,11 @@ Es decir: la función que la gente asocia a "balanceador" (repartir carga entre 
 
 | Capacidad | Por qué importa |
 |---|---|
-| **Un único dominio para los tres servicios** | Servir `app.trustex.com/` (frontend), `/api/*` (Node) y `/java/*` (Java) desde el mismo host. Esto es enrutado por path, y sin LB no existe. |
+| **Un único dominio para frontend y API** | Servir `app.trustex.eu/` (frontend) y `/api/*` (Node) desde el mismo host. Esto es enrutado por path, y sin LB solo se consigue con el proxy de nginx del propio frontend. |
 | **Elimina CORS y evita exponer URLs `run.app`** | Al estar todo bajo el mismo origen, el navegador no hace peticiones cross-origin. |
 | **IP estática anycast** | Necesaria si un tercero (banco, pasarela, cliente corporativo) tiene que meter tu IP en una allowlist. |
 | **Cloud Armor (WAF)** | Reglas de bloqueo, rate limiting, protección OWASP, mitigación DDoS de capa 7. Solo se puede enganchar a un LB. |
-| **Cloud CDN** | Caché en el edge para estáticos de Next.js. Reduce coste de egress y latencia. |
+| **Cloud CDN** | Caché en el edge para el bundle estático de la SPA. Reduce coste de egress y latencia. |
 | **Certificados propios** | Si necesitas subir tu propio certificado en lugar del gestionado por Google. |
 | **Dominio propio en cualquier región** | Ver el punto 1.4, que es importante para este proyecto. |
 | **Multi-región** | Repartir tráfico entre regiones con una sola IP. Hoy no aplica: todo está en una región. |
@@ -105,7 +105,7 @@ Si buscas el punto intermedio, un **balanceador regional** (`EXTERNAL_MANAGED` r
 
 ---
 
-## 2. VPC para la comunicación Node ↔ Java
+## 2. VPC para la comunicación Node ↔ DSS
 
 ### 2.1 Respuesta corta
 
@@ -114,21 +114,21 @@ Si buscas el punto intermedio, un **balanceador regional** (`EXTERNAL_MANAGED` r
 ```137:140:terraform/cloudRun.tf
       env {
         name  = "JAVA_SERVICE_URL"
-        value = google_cloud_run_v2_service.java.uri
+        value = google_cloud_run_v2_service.dss.uri
       }
 ```
 
-Y el dato que cierra la discusión de coste: según la documentación de Google, **no hay cargos de red para el tráfico entre dos servicios de Cloud Run en la misma región**. Node hablando con Java cuesta 0 $ en red, tanto ahora como con volumen alto, siempre que ambos estén en la misma región (lo están: los dos usan `var.region`).
+Y el dato que cierra la discusión de coste: según la documentación de Google, **no hay cargos de red para el tráfico entre dos servicios de Cloud Run en la misma región**. Node hablando con DSS cuesta 0 $ en red, tanto ahora como con volumen alto, siempre que ambos estén en la misma región (lo están: los dos usan `var.region`).
 
 ### 2.2 Cómo debe hacerse esa comunicación (seguridad sin VPC)
 
-La protección no viene de la red, viene de IAM. El servicio Java no debe ser invocable por cualquiera; solo por la cuenta de servicio del backend de Node.
+La protección no viene de la red, viene de IAM. El servicio DSS no debería ser invocable por cualquiera; solo por la cuenta de servicio del backend de Node.
 
-Hoy los tres servicios están públicos porque `allow_unauthenticated = true` los abre a `allUsers`. Lo correcto para Java, que nadie debería llamar desde el navegador, es:
+Hoy los tres servicios están públicos. El frontend y el backend lo necesitan (el navegador y el proxy de nginx llegan sin credenciales). DSS no: nadie lo llama desde el navegador. Lo correcto es:
 
-1. **No dar `run.invoker` a `allUsers`** en el servicio Java.
+1. **No dar `run.invoker` a `allUsers`** en el servicio DSS: es exactamente lo que hace `dss_public_invoker = false`.
 2. **Dar `run.invoker` solo a la cuenta de servicio de Node** (`google_service_account.backend`).
-3. En el código Node, obtener un **ID token de OIDC** con el claim `aud` igual a la URL del servicio Java, y enviarlo en la cabecera `Authorization: Bearer <token>`. Las librerías cliente de Google (`google-auth-library` en Node) lo hacen en una línea, obteniendo el token del metadata server.
+3. En el código Node, obtener un **ID token de OIDC** con el claim `aud` igual a la URL del servicio DSS, y enviarlo en la cabecera `Authorization: Bearer <token>`. Las librerías cliente de Google (`google-auth-library` en Node) lo hacen en una línea, obteniendo el token del metadata server. El sitio es `backend/src/verification/dss-client.ts`, que hoy hace un `fetch` sin cabecera de autorización: mientras siga así, `dss_public_invoker` tiene que quedarse en `true`.
 
 El resultado es equivalente en seguridad a una red privada: el tráfico se queda dentro de la red de Google y solo una identidad concreta puede invocar el servicio. Coste: 0 $.
 
@@ -176,8 +176,8 @@ Vale la pena meterla si aparece alguno de estos requisitos:
 
 Para el estado actual del proyecto:
 
-- **No metas VPC.** Node ↔ Java por URL HTTPS + ID token de IAM: gratis, simple y seguro.
-- **Endurece IAM**: quita el acceso público del servicio Java y del backend de Node si no se llaman desde el navegador. Deja público solo el frontend.
+- **No metas VPC.** Node ↔ DSS por URL HTTPS + ID token de IAM: gratis, simple y seguro.
+- **Endurece IAM**: quita el acceso público del servicio DSS en cuanto el backend firme la llamada. El backend de Node sí tiene que seguir público mientras el proxy de nginx del frontend le llame sin credenciales.
 - Si en el futuro hace falta red privada, usa **Direct VPC egress**, nunca un Serverless VPC Access connector.
 
 ---
@@ -188,8 +188,8 @@ Para el estado actual del proyecto:
 |---|---|---|
 | ¿Load balancer? | **No por ahora** (`enable_load_balancer = false`) | Cuota fija de ~18,25 $/mes que rompe el presupuesto de 25 $ sin aportar nada que Cloud Run no dé ya |
 | ¿Cómo servir un dominio propio? | Domain mapping, **cambiando la región a `europe-west1`** | Gratis; en `europe-southwest1` esa función no existe |
-| ¿VPC para Node ↔ Java? | **No** | Cloud Run a Cloud Run en la misma región no tiene coste de red y se protege con IAM |
-| ¿Cómo se protege el servicio Java? | IAM: `run.invoker` solo para la SA del backend + ID token | Equivalente a red privada, coste 0 |
+| ¿VPC para Node ↔ DSS? | **No** | Cloud Run a Cloud Run en la misma región no tiene coste de red y se protege con IAM |
+| ¿Cómo se protege el servicio DSS? | IAM: `run.invoker` solo para la SA del backend + ID token (`dss_public_invoker = false`) | Equivalente a red privada, coste 0 |
 | ¿Cómo se conecta a Postgres? | Conector nativo de Cloud SQL (socket Unix) | Evita el coste fijo del connector de VPC |
 | Si algún día hace falta VPC | Direct VPC egress | Escala a cero; el connector se cobra siempre |
 

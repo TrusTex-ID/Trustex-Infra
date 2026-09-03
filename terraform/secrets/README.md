@@ -5,10 +5,24 @@ que se cifran:
 
 | Fichero | Contenido | Se sube a git |
 |---|---|---|
-| `backend` | Variables del backend | **No** (texto claro) |
-| `postgres` | Variables de base de datos | **No** (texto claro) |
+| `backend` | Entorno del Cloud Run del backend | **No** (texto claro) |
+| `postgres` | Entradas con las que Terraform crea Cloud SQL | **No** (texto claro) |
 | `backend.age` | `backend` cifrado | Sí |
 | `postgres.age` | `postgres` cifrado | Sí |
+
+Los dos ficheros tienen papeles distintos:
+
+- **`backend`** se inyecta tal cual como variables de entorno del Cloud Run del
+  backend. El contrato exacto lo define `backend/src/config/env.ts` en
+  `trustex-web`; si falta una obligatoria, la revision no arranca.
+- **`postgres`** solo lo lee Terraform: con `DB_NAME`, `DB_USER` y `DB_PASSWORD`
+  crea la base de datos y el usuario de Cloud SQL y construye la `DATABASE_URL`
+  que reciben el backend y el job de migraciones. **No** se reenvia a ningun
+  servicio, asi que no pongas ahi variables de aplicacion.
+
+Terraform inyecta por su cuenta `DATABASE_URL`, `INSTANCE_CONNECTION_NAME` y
+`DSS_VALIDATION_URL`, y esos valores ganan siempre a lo que haya en los
+ficheros: un valor viejo no puede apuntar la app a otra instancia.
 
 Para añadir un tercer fichero de secretos hay que declararlo en la lista
 `ManagedFiles` / `MANAGED_FILES` de `scripts/secrets.ps1` y `scripts/secrets.sh`.

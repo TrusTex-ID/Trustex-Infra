@@ -6,23 +6,58 @@ zone   = "europe-west1-b"
 
 debug = false
 
-frontend_tag = "0.40.0"
-backend_tag  = "0.55.0"
-java_tag     = "0.55.0"
+# --- Imagenes ---------------------------------------------------------------
+# Una etiqueta por Dockerfile. Ver `make images` para los cuatro builds.
+frontend_tag = "latest" # trustex-web/frontend      (Vite SPA + nginx)
+backend_tag  = "latest" # trustex-web/backend       (Express + Prisma)
+dss_tag      = "latest" # dss-validation-docker     (EU DSS sobre Tomcat)
+setup_tag    = "latest" # trustex-web/setup         (job de migraciones)
 
 # --- Primer apply -----------------------------------------------------------
 # El registry esta vacio hasta que subas las imagenes, asi que el primer apply
 # fallaria al no encontrar los tags. Descomenta esto para arrancar con el
 # contenedor de prueba de Cloud Run, y vuelve a comentarlo tras el primer push.
+# El de "dss" no responde en 8080 con la config real, pero el arranque no falla.
 #
 # frontend_image = "us-docker.pkg.dev/cloudrun/container/hello"
 # backend_image  = "us-docker.pkg.dev/cloudrun/container/hello"
-# java_image     = "us-docker.pkg.dev/cloudrun/container/hello"
+# dss_image      = "us-docker.pkg.dev/cloudrun/container/hello"
+# setup_image    = "us-docker.pkg.dev/cloudrun/container/hello"
+
+# --- Frontend ---------------------------------------------------------------
+# VITE_DPP_BASE_URL se incrusta en el bundle en tiempo de build; lo usa
+# `make build-frontend` como --build-arg, no es una env var de Cloud Run.
+frontend_dpp_base_url = "https://dpp.trustex.eu"
+
+# Origen publico del frontend, que el backend recibe como FRONTEND_URL (CORS).
+# Solo hace falta si algo llama al backend cross-origin; la SPA usa el proxy
+# /api/v1 del propio nginx. Copialo del output `frontend_url` tras el 1er apply.
+# frontend_public_url = "https://trustex-dev-frontend-123456789.europe-west1.run.app"
+
+# --- Job de base de datos ---------------------------------------------------
+setup_run_migrations = true
+setup_run_seed       = false
+
+# --- DSS --------------------------------------------------------------------
+# Privado por defecto, como manda la guia del propio servicio: la imagen sirve
+# tambien UI web, Swagger, SOAP y /server-sign/**, que firma con un keystore de
+# demo con contrasena publica. Solo la SA del backend deberia invocarlo.
+#
+# OJO: eso exige que backend/src/verification/dss-client.ts mande un ID token de
+# OIDC, cosa que hoy NO hace. Mientras siga con un fetch pelado, ponlo en true o
+# la validacion de firmas responde 403. Ver docs/apps-y-servicios.md.
+dss_public_invoker = false
+
+# 0 = Modo A: escala a cero, CPU limitada entre peticiones. Practicamente
+#     gratis. Correcto solo si la imagen lleva el cache LOTL horneado.
+# 1 = Modo B: siempre caliente y CPU siempre asignada (Terraform lo deriva de
+#     este valor). Sin arranque en frio, pero ~90-120 $/mes: fuera de presupuesto.
+dss_min_instances = 0
 
 # --- Dominio propio (gratis, sin balanceador) -------------------------------
 # Solo disponible en ciertas regiones; europe-west1 es una de ellas.
-# frontend_custom_domain = "app.trustex.com"
+# frontend_custom_domain = "app.trustex.eu"
 
 # --- Balanceador global (+~18 $/mes, se sale del presupuesto) ---------------
 # enable_load_balancer = true
-# lb_domains           = ["app.trustex.com"]
+# lb_domains           = ["app.trustex.eu"]

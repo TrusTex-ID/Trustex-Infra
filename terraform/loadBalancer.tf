@@ -3,7 +3,11 @@
 # COST WARNING: A global forwarding rule alone is roughly ~$18/month.
 # Combined with Cloud SQL this usually exceeds the $20–25 budget.
 # Keep var.enable_load_balancer = false unless you accept the extra cost.
-# Prefer domain_mapping.tf for a custom domain within budget.
+# Prefer domainMapping.tf for a custom domain within budget.
+#
+# Only the frontend and the backend sit behind it. The DSS validation service is
+# called server-to-server by the backend, never by a browser, so putting it on a
+# public URL map would only widen its exposure.
 
 locals {
   lb_enabled = var.enable_load_balancer
@@ -40,18 +44,6 @@ resource "google_compute_region_network_endpoint_group" "backend" {
   }
 }
 
-resource "google_compute_region_network_endpoint_group" "java" {
-  count = local.lb_enabled ? 1 : 0
-
-  name                  = "${local.name_prefix}-java-neg"
-  network_endpoint_type = "SERVERLESS"
-  region                = var.region
-
-  cloud_run {
-    service = google_cloud_run_v2_service.java.name
-  }
-}
-
 resource "google_compute_backend_service" "frontend" {
   count = local.lb_enabled ? 1 : 0
 
@@ -76,18 +68,6 @@ resource "google_compute_backend_service" "backend" {
   }
 }
 
-resource "google_compute_backend_service" "java" {
-  count = local.lb_enabled ? 1 : 0
-
-  name                  = "${local.name_prefix}-java-backend"
-  load_balancing_scheme = "EXTERNAL_MANAGED"
-  protocol              = "HTTP"
-
-  backend {
-    group = google_compute_region_network_endpoint_group.java[0].id
-  }
-}
-
 resource "google_compute_url_map" "main" {
   count = local.lb_enabled ? 1 : 0
 
@@ -103,14 +83,12 @@ resource "google_compute_url_map" "main" {
     name            = "services"
     default_service = google_compute_backend_service.frontend[0].id
 
+    # The SPA calls /api/v1/... (frontend/src/infraestructure/http.ts). With the
+    # LB in front, these paths reach the backend directly and the frontend's own
+    # nginx proxy is bypassed — everything is already same-origin.
     path_rule {
       paths   = ["/api/*", "/api"]
       service = google_compute_backend_service.backend[0].id
-    }
-
-    path_rule {
-      paths   = ["/java/*", "/java"]
-      service = google_compute_backend_service.java[0].id
     }
   }
 }

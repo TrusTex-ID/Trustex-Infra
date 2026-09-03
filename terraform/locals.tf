@@ -17,12 +17,25 @@ locals {
   artifact_registry_url           = "${var.region}-docker.pkg.dev/${var.project_id}/${local.artifact_registry_repository_id}"
 
   # A *_image override wins; otherwise the image is <registry>/<service>:<tag>.
+  #
+  # Which Dockerfile builds each one (see docs/apps-y-servicios.md):
+  #   frontend -> trustex-web/frontend/Dockerfile   Vite SPA served by nginx
+  #   backend  -> trustex-web/backend/Dockerfile    Express + Prisma
+  #   dss      -> dss-validation-docker/Dockerfile  EU DSS webapp on Tomcat
+  #   setup    -> trustex-web/setup/Dockerfile      Prisma migrate/seed job
   frontend_image = var.frontend_image != "" ? var.frontend_image : "${local.artifact_registry_url}/frontend:${var.frontend_tag}"
   backend_image  = var.backend_image != "" ? var.backend_image : "${local.artifact_registry_url}/backend:${var.backend_tag}"
-  java_image     = var.java_image != "" ? var.java_image : "${local.artifact_registry_url}/java:${var.java_tag}"
+  dss_image      = var.dss_image != "" ? var.dss_image : "${local.artifact_registry_url}/dss:${var.dss_tag}"
+  setup_image    = var.setup_image != "" ? var.setup_image : "${local.artifact_registry_url}/setup:${var.setup_tag}"
 
   # ---------------------------------------------------------------------------
   # Env vars from terraform/secrets/{backend,postgres}.
+  #
+  #   postgres -> inputs Terraform needs to provision Cloud SQL (DB_NAME,
+  #               DB_USER, DB_PASSWORD). NOT forwarded to any service: the apps
+  #               only see the DATABASE_URL that Terraform builds from them.
+  #   backend  -> environment of the Node backend service (JWT, blockchain,
+  #               Pinata, Scantrust, ...). Forwarded as-is.
   #
   # Values land in plaintext in terraform state — treat the state as a secret.
   # Files are gitignored and produced by `make secrets-decrypt`.
@@ -47,48 +60,140 @@ locals {
   }
 
   # ---------------------------------------------------------------------------
-  # Values Terraform derives from the infrastructure itself. They are unknown
-  # until Cloud SQL exists, so Terraform injects them instead of asking you to
-  # copy them into the secrets files. Merged last, so they always win: a stale
-  # value left in a secrets file cannot point the app at the wrong instance.
+  # Database connection
+  #
+  # Cloud Run reaches Cloud SQL over the Unix socket its built-in connector
+  # mounts at /cloudsql/<connection name>. Both database consumers read a single
+  # DATABASE_URL:
+  #   - runtime: the node-postgres pool in backend/src/database/prisma.service.ts
+  #   - setup job: `prisma migrate deploy` via backend/prisma.config.ts
+  # node-postgres and the Prisma engine both take the socket directory from the
+  # `host` query parameter and ignore the host in the authority part.
   # ---------------------------------------------------------------------------
 
-  cloudsql_derived_env = {
+  db_name_effective     = lookup(local.secrets_postgres, "DB_NAME", "trustex")
+  db_user_effective     = lookup(local.secrets_postgres, "DB_USER", "trustex")
+  db_password_effective = lookup(local.secrets_postgres, "DB_PASSWORD", "")
+
+  cloudsql_socket_dir = "/cloudsql/${local.cloudsql_connection_name}"
+
+  # urlencode on user/password: they may legitimately contain :, @, / or #.
+  database_url = join("", [
+    "postgresql://",
+    urlencode(local.db_user_effective),
+    ":",
+    urlencode(local.db_password_effective),
+    "@localhost:5432/",
+    local.db_name_effective,
+    "?host=",
+    urlencode(local.cloudsql_socket_dir),
+    "&schema=public",
+  ])
+
+  # ---------------------------------------------------------------------------
+  # Values Terraform derives from the infrastructure itself. They are unknown
+  # until Cloud SQL / Cloud Run exist, so Terraform injects them instead of
+  # asking you to copy them into the secrets files. Merged last, so they always
+  # win: a stale value left in a secrets file cannot point the app at the wrong
+  # instance.
+  # ---------------------------------------------------------------------------
+
+  backend_derived_env = {
+    DATABASE_URL             = local.database_url
     INSTANCE_CONNECTION_NAME = local.cloudsql_connection_name
-    DB_HOST                  = "/cloudsql/${local.cloudsql_connection_name}"
+    # backend/src/verification/dss-client.ts appends
+    # /services/rest/validation/validateSignature to this base URL.
+    DSS_VALIDATION_URL = google_cloud_run_v2_service.dss.uri
   }
 
-  db_name_effective = lookup(local.secrets_postgres, "DB_NAME", "trustex")
+  # CORS origin for the browser (backend/src/common/middleware/cors.middleware.ts).
+  #
+  # The SPA calls /api/v1 same-origin through the frontend's nginx proxy, so CORS
+  # is normally never exercised and this may stay empty. It cannot be wired to
+  # google_cloud_run_v2_service.frontend.uri: the frontend already depends on the
+  # backend URI (BACKEND_URL), so that would be a dependency cycle — hence the
+  # variable. Listed before the secrets files so `secrets/backend` can override.
+  frontend_public_url_effective = coalesce(
+    var.frontend_public_url != "" ? var.frontend_public_url : null,
+    var.frontend_custom_domain != "" ? "https://${var.frontend_custom_domain}" : null,
+    "",
+  )
 
-  # Default JDBC URL for the Cloud SQL socket factory. Listed before the secrets
-  # files on purpose: override SPRING_DATASOURCE_URL there if you need extra
-  # JDBC parameters.
-  java_datasource_default = {
-    SPRING_DATASOURCE_URL = "jdbc:postgresql:///${local.db_name_effective}?cloudSqlInstance=${local.cloudsql_connection_name}&socketFactory=com.google.cloud.sql.postgres.SocketFactory"
-  }
+  frontend_url_env = local.frontend_public_url_effective != "" ? {
+    FRONTEND_URL = local.frontend_public_url_effective
+  } : {}
 
   # Listed before the secrets files so a file can override it.
   debug_env = var.debug ? { DEBUG = "true" } : {}
 
-  # Backend Cloud Run. On a key clash: backend file beats postgres file, and
-  # Terraform-derived values beat both.
+  # Backend Cloud Run. On a key clash: the backend file beats the computed
+  # FRONTEND_URL, and the Terraform-derived values beat everything.
   backend_service_env = merge(
     local.debug_env,
-    local.secrets_postgres,
+    local.frontend_url_env,
     local.secrets_backend,
-    local.cloudsql_derived_env,
-    { JAVA_SERVICE_URL = google_cloud_run_v2_service.java.uri },
+    local.backend_derived_env,
   )
 
-  # Java Cloud Run: postgres file plus the derived Cloud SQL values.
-  java_service_env = merge(
+  # The DSS validation service takes no configuration: its own deployment guide
+  # states that no environment variable is required, and CATALINA_OPTS in
+  # particular must be left alone so the image can size the JVM heap from the
+  # container memory limit. This stays empty on purpose.
+  dss_service_env = local.debug_env
+
+  # nginx in the frontend image proxies /api/v1 to the backend. Both forms are
+  # provided because they serve different purposes: BACKEND_URL is the origin the
+  # app config uses (frontend/.env.example, vite.config.ts), while an nginx
+  # proxy_pass template needs the bare host — it supplies the scheme itself and
+  # Cloud Run routes on the Host header. See docs/apps-y-servicios.md.
+  #
+  # VITE_* values are inlined into the JS bundle at build time and cannot be set
+  # here: they go through --build-arg (var.frontend_dpp_base_url).
+  frontend_service_env = merge(
     local.debug_env,
-    local.java_datasource_default,
-    local.secrets_postgres,
-    local.cloudsql_derived_env,
+    {
+      BACKEND_URL  = google_cloud_run_v2_service.backend.uri
+      BACKEND_HOST = replace(google_cloud_run_v2_service.backend.uri, "https://", "")
+    },
   )
 
-  frontend_service_env = local.debug_env
+  # Setup Cloud Run Job: database connection plus its own flags
+  # (backend/src/setup/setup.config.ts).
+  setup_job_env = {
+    DATABASE_URL           = local.database_url
+    SETUP_RUN_MIGRATIONS   = var.setup_run_migrations ? "true" : "false"
+    SETUP_RUN_SEED         = var.setup_run_seed ? "true" : "false"
+    SETUP_DB_WAIT_RETRIES  = tostring(var.setup_db_wait_retries)
+    SETUP_DB_WAIT_DELAY_MS = tostring(var.setup_db_wait_delay_ms)
+  }
+
+  # Keys backend/src/config/env.ts requires with no default. A revision missing
+  # any of them throws "Invalid environment variables" on boot, which Cloud Run
+  # only surfaces as a failed health check.
+  backend_required_env = [
+    "JWT_SECRET",
+    "BLOCKCHAIN_RPC_URL",
+    "BLOCKCHAIN_PRIVATE_KEY",
+    "FACTORY_CONTRACT_ADDRESS",
+    "FORWARDER_CONTRACT_ADDRESS",
+    "PINATA_JWT",
+    "WALLET_ENCRYPTION_KEY",
+  ]
+
+  backend_missing_env = [
+    for key in local.backend_required_env : key
+    if lookup(local.secrets_backend, key, "") == ""
+  ]
+
+  # Cloud Run sets these itself and rejects a revision that also declares them.
+  # PORT in particular is tempting to write in the secrets file — don't: Cloud
+  # Run derives it from ports.container_port and src/config/env.ts reads it.
+  cloudrun_reserved_env = ["PORT", "K_SERVICE", "K_REVISION", "K_CONFIGURATION"]
+
+  backend_reserved_env_used = [
+    for key in local.cloudrun_reserved_env : key
+    if contains(keys(local.secrets_backend), key)
+  ]
 }
 
 check "backend_env_file_present" {
@@ -101,13 +206,45 @@ check "backend_env_file_present" {
 check "postgres_env_file_present" {
   assert {
     condition     = fileexists(local.postgres_env_file)
-    error_message = "terraform/secrets/postgres not found: DB-related services will deploy without env vars from that file. Run `make secrets-decrypt` first."
+    error_message = "terraform/secrets/postgres not found: Cloud SQL would be created with default names and no password. Run `make secrets-decrypt` first."
   }
 }
 
 check "postgres_db_password_present" {
   assert {
-    condition     = lookup(local.secrets_postgres, "DB_PASSWORD", "") != ""
-    error_message = "terraform/secrets/postgres must define DB_PASSWORD (used by Cloud SQL and Cloud Run)."
+    condition     = local.db_password_effective != ""
+    error_message = "terraform/secrets/postgres must define DB_PASSWORD (used by Cloud SQL and to build DATABASE_URL)."
+  }
+}
+
+check "backend_required_env_present" {
+  assert {
+    condition = length(local.backend_missing_env) == 0
+    error_message = join(" ", [
+      "terraform/secrets/backend is missing values required by backend/src/config/env.ts:",
+      join(", ", local.backend_missing_env),
+      "- the backend revision will fail to start. See terraform/secrets/backend.example.",
+    ])
+  }
+}
+
+check "backend_no_reserved_env" {
+  assert {
+    condition = length(local.backend_reserved_env_used) == 0
+    error_message = join(" ", [
+      "terraform/secrets/backend declares env vars reserved by Cloud Run:",
+      join(", ", local.backend_reserved_env_used),
+      "- remove them or the revision is rejected. PORT comes from ports.container_port.",
+    ])
+  }
+}
+
+check "wallet_encryption_key_length" {
+  assert {
+    condition = (
+      lookup(local.secrets_backend, "WALLET_ENCRYPTION_KEY", "") == "" ||
+      length(local.secrets_backend["WALLET_ENCRYPTION_KEY"]) == 64
+    )
+    error_message = "WALLET_ENCRYPTION_KEY must be 64 hex chars (32 bytes), as required by backend/src/config/env.ts."
   }
 }

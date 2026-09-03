@@ -4,18 +4,28 @@ output "artifact_registry_url" {
 }
 
 output "frontend_url" {
-  description = "Cloud Run URL for the Next.js frontend."
+  description = "Cloud Run URL for the React/Vite SPA. This is the app entry point."
   value       = google_cloud_run_v2_service.frontend.uri
 }
 
 output "backend_url" {
-  description = "Cloud Run URL for the Node.js backend."
+  description = "Cloud Run URL for the Express backend. The SPA reaches it through the frontend's /api/v1 proxy, not directly."
   value       = google_cloud_run_v2_service.backend.uri
 }
 
-output "java_url" {
-  description = "Cloud Run URL for the Spring Boot service."
-  value       = google_cloud_run_v2_service.java.uri
+output "dss_url" {
+  description = "Cloud Run URL for the EU DSS validation webapp (injected into the backend as DSS_VALIDATION_URL)."
+  value       = google_cloud_run_v2_service.dss.uri
+}
+
+output "setup_job_name" {
+  description = "Cloud Run Job that applies Prisma migrations. Execute it with `make db-setup`."
+  value       = google_cloud_run_v2_job.setup.name
+}
+
+output "setup_job_execute_command" {
+  description = "Ready-to-run command for the database setup job."
+  value       = "gcloud run jobs execute ${google_cloud_run_v2_job.setup.name} --region ${var.region} --project ${var.project_id} --wait"
 }
 
 output "cloud_sql_connection_name" {
@@ -38,6 +48,12 @@ output "db_user" {
   value       = google_sql_user.app.name
 }
 
+output "database_url" {
+  description = "DATABASE_URL injected into the backend and the setup job (Cloud SQL Unix socket)."
+  value       = local.database_url
+  sensitive   = true
+}
+
 output "db_password_secret_id" {
   description = "Secret Manager secret ID holding a copy of DB_PASSWORD from terraform/secrets/postgres."
   value       = google_secret_manager_secret.db_password.secret_id
@@ -53,17 +69,22 @@ output "backend_service_account" {
   value       = google_service_account.backend.email
 }
 
-output "java_service_account" {
-  description = "Service account email used by the Java Cloud Run service."
-  value       = google_service_account.java.email
+output "dss_service_account" {
+  description = "Service account email used by the DSS Cloud Run service."
+  value       = google_service_account.dss.email
+}
+
+output "setup_service_account" {
+  description = "Service account email used by the database setup Cloud Run Job."
+  value       = google_service_account.setup.email
 }
 
 output "frontend_domain_mapping_records" {
   description = "DNS records required when frontend_custom_domain is set."
   value = var.frontend_custom_domain != "" ? [
     for rr in try(google_cloud_run_domain_mapping.frontend[0].status[0].resource_records, []) : {
-      type  = rr.type
-      name  = rr.name
+      type   = rr.type
+      name   = rr.name
       rrdata = rr.rrdata
     }
   ] : []
@@ -75,10 +96,16 @@ output "load_balancer_ip" {
 }
 
 output "suggested_image_paths" {
-  description = "Suggested Artifact Registry image paths for CI/CD pushes."
+  description = "Artifact Registry image paths, one per Dockerfile in the source repos."
   value = {
     frontend = "${local.artifact_registry_url}/frontend"
     backend  = "${local.artifact_registry_url}/backend"
-    java     = "${local.artifact_registry_url}/java"
+    dss      = "${local.artifact_registry_url}/dss"
+    setup    = "${local.artifact_registry_url}/setup"
   }
+}
+
+output "project_id" {
+  description = "Echoes var.project_id so the Makefile and CI have a single source of truth for it."
+  value       = var.project_id
 }
