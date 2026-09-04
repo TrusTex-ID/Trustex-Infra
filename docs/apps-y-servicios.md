@@ -4,6 +4,10 @@ Este documento es el puente entre los repos de aplicación y `terraform/`. Si
 cambias un puerto, una variable de entorno obligatoria o un Dockerfile en
 `trustex-web`, aquí está lo que hay que tocar en la infraestructura.
 
+Para la configuración en concreto —qué variable se fija al construir la imagen,
+cuál en el `apply`, cuál deriva Terraform y cuál no la lee nadie— hay un
+documento aparte: [variables-de-entorno.md](variables-de-entorno.md).
+
 Repos, tal y como se esperan clonados uno al lado del otro:
 
 ```
@@ -24,7 +28,10 @@ cetim/trustex/
 | `trustex-<env>-dss` | `dss` | `dss-validation-docker/Dockerfile` | 8080 (Tomcat) | no |
 | `trustex-<env>-setup` (Job) | `setup` | `trustex-web/setup/Dockerfile` | — | sí |
 
-`make images` imprime la misma tabla con las rutas del registry ya resueltas.
+**Cada repo construye y publica sus propias imágenes.** Este repo no las
+construye: solo consume los tags. `make images` en `trustex-web` y `make image`
+en `dss-validation-docker` imprimen esta misma tabla con las rutas del registry
+ya resueltas.
 
 ### Frontend: no es Next.js
 
@@ -35,7 +42,9 @@ Es una SPA de **React + Vite** compilada a ficheros estáticos y servida por
 2. `NODE_ENV` no significa nada en tiempo de ejecución.
 3. Las variables `VITE_*` (hoy solo `VITE_DPP_BASE_URL`) las incrusta Vite en el
    bundle de JavaScript **durante el build**. No se pueden cambiar desde Cloud
-   Run: van como `--build-arg` (`make build-frontend`, `var.frontend_dpp_base_url`).
+   Run ni desde Terraform: van como `--build-arg`, y su única fuente es
+   `DPP_BASE_URL` en `trustex-web/Makefile` (`make build-frontend
+   DPP_BASE_URL=...`, desde ese repo).
 
 ### Backend
 
@@ -70,8 +79,9 @@ configuración:
   en una demo de tres llamadas. Con el caché dentro de la imagen, los trust
   anchors se cargan en el `@PostConstruct` (`offlineRefresh`), donde Cloud Run
   sí da CPU completa. `lotl-cache/` se versiona **vacío**, así que hay que
-  poblarlo antes del primer build: `make dss-lotl-up` → esperar a
-  `Nb of loaded trusted lists` → `make dss-lotl-save` → `make build-dss`.
+  poblarlo antes del primer build, **desde `dss-validation-docker`**:
+  `make lotl-up` → esperar a `Nb of loaded trusted lists` → `make lotl-save` →
+  `make build`.
 - **Sondas a `/health`, nunca a `/health/ready`.** Cloud Run no distingue
   *listo* de *vivo*: el `503` que devuelve `/health/ready` mientras carga el
   LOTL se leería como contenedor muerto y lo reiniciaría en bucle.
@@ -112,108 +122,61 @@ una base de datos son decisiones distintas. Se lanza con `make db-setup`.
 
 ---
 
-## 2. Dos cambios pendientes en `trustex-web`
+## 2. Dos ajustes que se hicieron en `trustex-web` para esta infraestructura
 
-La infraestructura está completa, pero hay dos cosas que solo se pueden arreglar
-en el código de la aplicación. Sin la primera, la API no responde; sin la
-segunda, la validación de firmas devuelve `403`.
+La infraestructura por sí sola no bastaba: el código de la aplicación asumía un
+despliegue con `docker-compose`, no Cloud Run. Ambos se corrigieron directamente
+en `trustex-web` — documentado ahí en
+`docs/changes/2026-09-03.md` según manda su propio `CLAUDE.md` — y aquí queda el
+porqué, por si hay que tocarlos otra vez.
 
 ### 2.1 El proxy `/api/v1` en Cloud Run
 
 La SPA llama a `/api/v1/...` en su **mismo origen**
 (`frontend/src/infraestructure/http.ts`) y espera que nginx haga de proxy hacia
 el backend. Así las cookies de sesión son de primera parte y no hay CORS. Pero
-`frontend/nginx.conf` tiene el upstream escrito a mano:
+`frontend/nginx.conf` tenía el upstream escrito a mano, apuntando al nombre de
+servicio de `docker-compose` (`http://backend:4000`) y reenviando el `Host` del
+propio frontend — que en Cloud Run, que enruta precisamente por esa cabecera,
+devuelve un 404 del frontal de Google en vez de llegar al backend.
 
-```nginx
-location /api/v1/ {
-    proxy_pass http://backend:4000;
-    proxy_set_header Host $host;
-}
-```
+Arreglado plantillando la configuración al arrancar el contenedor:
+`frontend/nginx.conf.template` usa `${BACKEND_HOST}` — el host que Terraform ya
+inyecta como env var — tanto en `proxy_pass` (con `https` y
+`proxy_ssl_server_name` para SNI) como en la cabecera `Host`, y
+`frontend/docker-entrypoint.d/40-render-nginx-conf.sh` lo resuelve con
+`envsubst` antes de que nginx arranque. Se usó una lista explícita de variables
+para `envsubst` en vez del mecanismo automático de la imagen (que sustituye
+cualquier `${VAR}` que coincida con el nombre de una variable de entorno,
+arriesgando chocar con las propias `$variables` de nginx) — por eso la
+plantilla no vive en `/etc/nginx/templates/`, que es donde ese mecanismo busca.
 
-Eso es el nombre de servicio de `docker-compose`. En Cloud Run hace falta:
-
-- el host real del Cloud Run del backend, que Terraform ya pasa al contenedor
-  como `BACKEND_URL` (`https://host`) y `BACKEND_HOST` (solo el host);
-- `https`, con SNI;
-- `Host` **igual al host del backend**, porque Cloud Run enruta por `Host`.
-  Reenviar el `Host` del frontend devuelve un 404 del frontal de Google.
-
-El patrón habitual es plantillar la configuración al arrancar el contenedor. La
-imagen `nginx` ya lo soporta: todo lo que esté en `/etc/nginx/templates/*.conf.template`
-se pasa por `envsubst` y se escribe en `/etc/nginx/conf.d/`. En el Dockerfile del
-frontend sería cambiar
-
-```dockerfile
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-```
-
-por
-
-```dockerfile
-COPY nginx.conf.template /etc/nginx/templates/default.conf.template
-```
-
-y en la plantilla usar `${BACKEND_HOST}`:
-
-```nginx
-location /api/v1/ {
-    proxy_pass         https://${BACKEND_HOST};
-    proxy_ssl_server_name on;
-    proxy_set_header   Host ${BACKEND_HOST};
-    proxy_http_version 1.1;
-    proxy_set_header   Cookie $http_cookie;
-    proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header   X-Forwarded-Proto $scheme;
-    proxy_pass_header  Set-Cookie;
-}
-```
-
-Mientras eso no exista, el frontend despliega y sirve la SPA, pero cualquier
-llamada a la API devuelve 502.
-
-Dos alternativas, si se prefiere no tocar la imagen:
-
-- **Balanceador global** (`enable_load_balancer = true`): enruta `/api/*` al
-  backend desde el propio balanceador y el proxy de nginx deja de usarse. Son
-  ~18 $/mes más.
-- **CORS**: que la SPA llame a la URL `run.app` del backend. Habría que darle una
-  variable `VITE_API_BASE_URL` (hoy no existe), poner `frontend_public_url` para
-  que el backend la acepte como origen, y las cookies pasan a ser de tercera
-  parte — frágil en Safari y en navegadores con bloqueo por defecto.
+Alternativas que se descartaron por añadir coste o fragilidad: el balanceador
+global (enruta `/api/*` sin proxy de nginx, pero son ~18 $/mes más) y CORS
+(la SPA llamando directamente a la URL `run.app` del backend, con cookies de
+tercera parte — frágil en Safari y en navegadores con bloqueo por defecto).
 
 ### 2.2 El ID token para llamar a DSS
 
-`dss_public_invoker = false` deja el servicio DSS accesible solo con un ID token
-de OIDC de una cuenta de servicio con `roles/run.invoker`. Terraform ya le ha
-dado ese rol a la SA del backend, así que falta únicamente que el cliente firme
-la llamada. Hoy `backend/src/verification/dss-client.ts` hace un `fetch` pelado:
+`dss_public_invoker = false` deja el servicio DSS accesible solo con un ID
+token de OIDC de una cuenta de servicio con `roles/run.invoker`. Terraform ya
+le daba ese rol a la SA del backend; faltaba que el cliente firmara la
+llamada — `backend/src/verification/dss-client.ts` hacía un `fetch` pelado, sin
+cabecera de autorización.
 
-```js
-const response = await fetch(`${DSS_BASE_URL}/services/rest/validation/validateSignature`, { ... })
-```
+Arreglado con `google-auth-library`: se resuelve un `IdTokenClient` una sola
+vez (perezosamente, en el primer uso) y se pide un ID token nuevo en cada
+llamada con `idTokenProvider.fetchIdToken(DSS_BASE_URL)`, añadido como
+`Authorization: Bearer <token>`. Si no hay forma de obtener el token —caso del
+`docker-compose` de `dss-validation-docker` en local, sin metadata server ni
+credenciales configuradas— la llamada sigue adelante sin cabecera, porque esa
+instancia local no tiene IAM delante. No hace falta ninguna variable de entorno
+nueva ni tocar el flujo de desarrollo local.
 
-Con `google-auth-library` (la propia guía de DSS trae el ejemplo) son unas pocas
-líneas; el token se obtiene del metadata server de Cloud Run, sin credenciales
-en el código:
-
-```js
-import { GoogleAuth } from 'google-auth-library'
-
-const client = await new GoogleAuth().getIdTokenClient(DSS_BASE_URL)
-const { data } = await client.request({
-  url: `${DSS_BASE_URL}/services/rest/validation/validateSignature`,
-  method: 'POST',
-  data: { signedDocument: { bytes, name } },
-})
-```
-
-Mientras no exista, la única alternativa es `dss_public_invoker = true`, que
-expone a internet no solo la validación sino también la UI web, Swagger, los
-servicios SOAP y `/server-sign/**` — que firma con un keystore de demo cuya
-contraseña (`password`) está publicada. Es un apaño para desarrollo, no algo
-que deba quedarse.
+Con esto, `dss_public_invoker` puede quedarse en `false`: ya no hace falta el
+apaño de abrir DSS al público (`true`), que exponía a internet, además de la
+validación, la UI web, Swagger, los servicios SOAP y `/server-sign/**` —que
+firma con un keystore de demo cuya contraseña (`password`) está publicada.
 
 Conviene además comprobar `/health/ready` (o el campo `ready` de `/health`)
 antes de fiarse de una validación: un `AdESig` donde debería haber `QESig` es
@@ -223,7 +186,11 @@ la forma en que este servicio falla.
 
 ## 3. Orden de despliegue
 
+Los pasos van en tres repos distintos: la infraestructura aquí, las imágenes en
+el repo que las contiene. El prompt de cada bloque indica dónde estás.
+
 ```bash
+# ---- trustex-infra ----------------------------------------------------------
 # 1) Secretos
 make secrets-decrypt          # o rellenar terraform/secrets/{backend,postgres}
 
@@ -231,33 +198,49 @@ make secrets-decrypt          # o rellenar terraform/secrets/{backend,postgres}
 #    (descomenta los *_image de placeholder en terraform.tfvars)
 make tf-init tf-apply
 
-# 3) Pre-calentar el caché LOTL de DSS (solo la primera vez y cuando envejezca)
-make dss-lotl-up
-docker compose -f ../dss-validation-docker/docker-compose.yml logs -f
+# ---- dss-validation-docker --------------------------------------------------
+# 3) Pre-calentar el caché LOTL (solo la primera vez y cuando envejezca)
+make lotl-up
+docker compose logs -f
 #   ...espera a "Nb of loaded trusted lists", Ctrl-C
-make dss-lotl-save
+make lotl-save
 
-# 4) Construir y subir las imágenes reales
+# 4) Construir y subir la imagen de DSS
 make docker-login
-make build-all push-all TAG=0.1.0
+make build push TAG=0.0.1
 
-# 5) Apply real
-#    (comenta los *_image y pon los *_tag = 0.1.0)
+# ---- trustex-web ------------------------------------------------------------
+# 5) Construir y subir las tres imágenes de la aplicación
+make docker-login
+make build-all push-all TAG=0.0.1
+
+# ---- trustex-infra ----------------------------------------------------------
+# 6) Apply real
+#    (comenta los *_image; los *_tag ya valen 0.0.1)
 make tf-apply
 
-# 6) Migraciones
+# 7) Migraciones
 make db-setup
 
-# 7) Comprobar que DSS sirve de verdad (state READY, no LOADING_TRUSTED_LISTS)
+# 8) Comprobar que DSS sirve de verdad (state READY, no LOADING_TRUSTED_LISTS)
 make dss-ready
 
-# 8) URLs
+# 9) URLs
 make urls
 ```
 
-A partir de ahí, un despliegue normal es: `make build-backend push-backend
-TAG=x.y.z`, subir `backend_tag` en `terraform.tfvars`, `make tf-apply` y
-`make db-setup` si la versión trae migraciones nuevas.
+Los `make docker-login` de los pasos 4 y 5 son el mismo comando y basta con
+hacerlo una vez por máquina.
+
+A partir de ahí, un despliegue normal del backend es: `make build-backend
+push-backend BACKEND_TAG=0.0.2` **en `trustex-web`**, subir `backend_tag` a ese
+mismo valor en `terraform.tfvars` **aquí**, `make tf-apply`, y `make db-setup` si
+la versión trae migraciones nuevas.
+
+Subir el tag no es opcional: Cloud Run fija la cadena de la imagen en la
+plantilla de la revisión, así que reutilizar un tag deja a Terraform sin cambio
+que aplicar y la revisión antigua sigue sirviendo. Por eso `latest` está
+prohibido por una `validation` en `variables.tf`.
 
 ---
 

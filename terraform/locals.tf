@@ -99,8 +99,10 @@ locals {
   # ---------------------------------------------------------------------------
 
   backend_derived_env = {
-    DATABASE_URL             = local.database_url
-    INSTANCE_CONNECTION_NAME = local.cloudsql_connection_name
+    # Read by backend/src/config/database-env.ts. The instance connection name
+    # is not passed separately: it is already inside this URL as the socket
+    # directory, and nothing in trustex-web reads it on its own.
+    DATABASE_URL = local.database_url
     # backend/src/verification/dss-client.ts appends
     # /services/rest/validation/validateSignature to this base URL.
     DSS_VALIDATION_URL = google_cloud_run_v2_service.dss.uri
@@ -111,51 +113,44 @@ locals {
   # The SPA calls /api/v1 same-origin through the frontend's nginx proxy, so CORS
   # is normally never exercised and this may stay empty. It cannot be wired to
   # google_cloud_run_v2_service.frontend.uri: the frontend already depends on the
-  # backend URI (BACKEND_URL), so that would be a dependency cycle — hence the
+  # backend URI (BACKEND_HOST), so that would be a dependency cycle — hence the
   # variable. Listed before the secrets files so `secrets/backend` can override.
-  frontend_public_url_effective = coalesce(
-    var.frontend_public_url != "" ? var.frontend_public_url : null,
-    var.frontend_custom_domain != "" ? "https://${var.frontend_custom_domain}" : null,
-    "",
+  #
+  # Not coalesce(): it rejects empty strings as well as nulls, so the "" fallback
+  # is never reached and the call fails outright when neither variable is set —
+  # which is the default configuration.
+  frontend_public_url_effective = (
+    var.frontend_public_url != "" ? var.frontend_public_url :
+    var.frontend_custom_domain != "" ? "https://${var.frontend_custom_domain}" :
+    ""
   )
 
   frontend_url_env = local.frontend_public_url_effective != "" ? {
     FRONTEND_URL = local.frontend_public_url_effective
   } : {}
 
-  # Listed before the secrets files so a file can override it.
-  debug_env = var.debug ? { DEBUG = "true" } : {}
-
   # Backend Cloud Run. On a key clash: the backend file beats the computed
   # FRONTEND_URL, and the Terraform-derived values beat everything.
   backend_service_env = merge(
-    local.debug_env,
     local.frontend_url_env,
     local.secrets_backend,
     local.backend_derived_env,
   )
 
-  # The DSS validation service takes no configuration: its own deployment guide
-  # states that no environment variable is required, and CATALINA_OPTS in
-  # particular must be left alone so the image can size the JVM heap from the
-  # container memory limit. This stays empty on purpose.
-  dss_service_env = local.debug_env
-
-  # nginx in the frontend image proxies /api/v1 to the backend. Both forms are
-  # provided because they serve different purposes: BACKEND_URL is the origin the
-  # app config uses (frontend/.env.example, vite.config.ts), while an nginx
-  # proxy_pass template needs the bare host — it supplies the scheme itself and
-  # Cloud Run routes on the Host header. See docs/apps-y-servicios.md.
+  # The frontend image is static nginx: no application process, so the only
+  # environment variable it can act on is the one its entrypoint substitutes.
+  # docker-entrypoint.d/40-render-nginx-conf.sh renders BACKEND_HOST into
+  # nginx.conf.template at container start and aborts if it is unset.
   #
-  # VITE_* values are inlined into the JS bundle at build time and cannot be set
-  # here: they go through --build-arg (var.frontend_dpp_base_url).
-  frontend_service_env = merge(
-    local.debug_env,
-    {
-      BACKEND_URL  = google_cloud_run_v2_service.backend.uri
-      BACKEND_HOST = replace(google_cloud_run_v2_service.backend.uri, "https://", "")
-    },
-  )
+  # A bare host, not a URL: proxy_pass supplies the scheme itself and Cloud Run
+  # routes on the Host header.
+  #
+  # VITE_* values cannot be set here at all — Vite inlines them into the JS
+  # bundle at build time, so they go through `docker build --build-arg` in
+  # `make build-frontend`. See docs/variables-de-entorno.md.
+  frontend_service_env = {
+    BACKEND_HOST = replace(google_cloud_run_v2_service.backend.uri, "https://", "")
+  }
 
   # Setup Cloud Run Job: database connection plus its own flags
   # (backend/src/setup/setup.config.ts).

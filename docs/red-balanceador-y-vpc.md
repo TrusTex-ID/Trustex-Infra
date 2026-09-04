@@ -101,6 +101,13 @@ enable_load_balancer = true
 lb_domains           = ["app.trustex.com"]
 ```
 
+Las dos van juntas: con `enable_load_balancer = true` y `lb_domains` vacío no
+hay certificado ni regla de forwarding, así que Terraform rechaza el plan en vez
+de construir medio balanceador. Y es incompatible con `frontend_custom_domain`,
+porque activar el balanceador cierra el ingress de Cloud Run al propio
+balanceador —si no, las URLs `run.app` seguirían respondiendo y cualquiera podría
+esquivarlo— y eso rompe el domain mapping. Terraform también lo rechaza.
+
 Si buscas el punto intermedio, un **balanceador regional** (`EXTERNAL_MANAGED` regional) baja la cuota a ~13 $/mes y sigue permitiendo Cloud Armor. Pierdes la IP anycast global y el multi-región, que hoy no usas. Requiere modificar `loadBalancer.tf` para usar recursos regionales.
 
 ---

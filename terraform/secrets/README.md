@@ -20,9 +20,9 @@ Los dos ficheros tienen papeles distintos:
   que reciben el backend y el job de migraciones. **No** se reenvia a ningun
   servicio, asi que no pongas ahi variables de aplicacion.
 
-Terraform inyecta por su cuenta `DATABASE_URL`, `INSTANCE_CONNECTION_NAME` y
-`DSS_VALIDATION_URL`, y esos valores ganan siempre a lo que haya en los
-ficheros: un valor viejo no puede apuntar la app a otra instancia.
+Terraform inyecta por su cuenta `DATABASE_URL` y `DSS_VALIDATION_URL`, y esos
+valores ganan siempre a lo que haya en los ficheros: un valor viejo no puede
+apuntar la app a otra instancia.
 
 Para añadir un tercer fichero de secretos hay que declararlo en la lista
 `ManagedFiles` / `MANAGED_FILES` de `scripts/secrets.ps1` y `scripts/secrets.sh`.

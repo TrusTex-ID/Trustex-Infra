@@ -17,5 +17,5 @@ resource "google_secret_manager_secret_version" "db_password" {
   count = lookup(local.secrets_postgres, "DB_PASSWORD", "") != "" ? 1 : 0
 
   secret      = google_secret_manager_secret.db_password.id
-  secret_data = local.secrets_postgres["DB_PASSWORD"]
+  secret_data = lookup(local.secrets_postgres, "DB_PASSWORD", "")
 }

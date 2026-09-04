@@ -2,7 +2,7 @@
 # Enabling them via Terraform avoids manual console setup.
 
 resource "google_project_service" "services" {
-  for_each = toset([
+  for_each = toset(concat([
     "artifactregistry.googleapis.com",
     "run.googleapis.com",
     "sqladmin.googleapis.com",
@@ -10,9 +10,16 @@ resource "google_project_service" "services" {
     "iam.googleapis.com",
     "iamcredentials.googleapis.com",
     "cloudresourcemanager.googleapis.com",
+    # Needed by the optional load balancer and by Cloud Run domain mapping.
     "compute.googleapis.com",
-    "servicenetworking.googleapis.com",
-  ])
+    ],
+    # Only reachable when a billing budget is actually requested: enabling it
+    # needs billing-account permissions that a plain project owner may not have.
+    var.billing_account_id != "" ? ["billingbudgets.googleapis.com"] : [],
+    # Only the optional email notification channels in budget.tf need this, and
+    # they are only created when there are addresses to notify.
+    var.billing_account_id != "" && length(var.budget_alert_emails) > 0 ? ["monitoring.googleapis.com"] : [],
+  ))
 
   project            = var.project_id
   service            = each.value

@@ -15,12 +15,6 @@ variable "zone" {
   default     = ""
 }
 
-variable "debug" {
-  description = "Injects DEBUG=true into the Cloud Run services. The secrets files can override it."
-  type        = bool
-  default     = false
-}
-
 variable "environment" {
   description = "Environment name used for resource naming and labels."
   type        = string
@@ -35,29 +29,58 @@ variable "environment" {
 # derived from project_id, region and the fixed repository name. Set the *_image
 # override only to point at an image outside this registry (for example the
 # Cloud Run hello placeholder on the very first apply, when the repo is empty).
+#
+# The tag is what actually deploys. Cloud Run pins the image string in the
+# revision template, so bumping one of these is what makes Terraform create a new
+# revision — and a mutable tag like `latest` breaks that: the string never
+# changes, Terraform sees no diff, and a freshly pushed image is never rolled
+# out. Hence the validation below, shared by all four.
+#
+# Keep these in step with the tags actually pushed (Makefile: TAG, or the
+# per-image FRONTEND_TAG / BACKEND_TAG / DSS_TAG / SETUP_TAG).
 
 variable "frontend_tag" {
   description = "Image tag for the React/Vite SPA served by nginx (trustex-web/frontend)."
   type        = string
-  default     = "latest"
+  default     = "0.0.1"
+
+  validation {
+    condition     = var.frontend_tag != "latest"
+    error_message = "Use an immutable version tag (0.0.1, 0.0.2, ...), not `latest`: the image string would never change, so Terraform would deploy no new revision."
+  }
 }
 
 variable "backend_tag" {
   description = "Image tag for the Express + Prisma backend (trustex-web/backend)."
   type        = string
-  default     = "latest"
+  default     = "0.0.1"
+
+  validation {
+    condition     = var.backend_tag != "latest"
+    error_message = "Use an immutable version tag (0.0.1, 0.0.2, ...), not `latest`: the image string would never change, so Terraform would deploy no new revision."
+  }
 }
 
 variable "dss_tag" {
   description = "Image tag for the EU DSS signature validation webapp (dss-validation-docker)."
   type        = string
-  default     = "latest"
+  default     = "0.0.1"
+
+  validation {
+    condition     = var.dss_tag != "latest"
+    error_message = "Use an immutable version tag (0.0.1, 0.0.2, ...), not `latest`: the image string would never change, so Terraform would deploy no new revision."
+  }
 }
 
 variable "setup_tag" {
   description = "Image tag for the database setup job (trustex-web/setup)."
   type        = string
-  default     = "latest"
+  default     = "0.0.1"
+
+  validation {
+    condition     = var.setup_tag != "latest"
+    error_message = "Use an immutable version tag (0.0.1, 0.0.2, ...), not `latest`: the image string would never change, so Terraform would deploy no new revision."
+  }
 }
 
 variable "frontend_image" {
@@ -102,16 +125,11 @@ variable "frontend_public_url" {
   default     = ""
 }
 
-variable "frontend_dpp_base_url" {
-  description = <<-EOT
-    Value of VITE_DPP_BASE_URL, the base URL of self-issued DPP identifiers.
-    Vite inlines VITE_* into the JS bundle at build time, so this is NOT a Cloud
-    Run env var: it is passed to `docker build --build-arg` by `make build-frontend`
-    and is only declared here so the whole configuration lives in one place.
-  EOT
-  type        = string
-  default     = "https://dpp.trustex.eu"
-}
+# VITE_DPP_BASE_URL is deliberately NOT a variable here. Vite inlines VITE_*
+# into the JS bundle at build time, so Terraform cannot set it: it is a
+# `docker build --build-arg`, and its single source of truth is DPP_BASE_URL in
+# the Makefile. Declaring it here too only invited the two to drift apart, since
+# an `apply` could never act on it. See docs/variables-de-entorno.md.
 
 # ---------------------------------------------------------------------------
 # DSS validation service
@@ -127,9 +145,11 @@ variable "dss_public_invoker" {
     password is public. Only the backend service account should reach it.
 
     That requires the caller to send an OIDC ID token, which
-    trustex-web/backend/src/verification/dss-client.ts does not do yet — it
-    calls the URL with a plain fetch. Until that is fixed, either set this to
-    true or signature validation returns 403. See docs/apps-y-servicios.md.
+    trustex-web/backend/src/verification/dss-client.ts does: it mints one with
+    google-auth-library and sends it as Authorization: Bearer, falling back to
+    an unauthenticated call only where no token can be obtained (local
+    docker-compose, which has no IAM in front). Leave this false — true is only
+    an escape hatch for debugging. See docs/apps-y-servicios.md.
   EOT
   type        = bool
   default     = false
@@ -218,6 +238,43 @@ variable "enable_load_balancer" {
 
 variable "lb_domains" {
   description = "Domains for the managed SSL certificate when the load balancer is enabled."
+  type        = list(string)
+  default     = []
+}
+
+# ---------------------------------------------------------------------------
+# Billing budget
+#
+# The whole configuration is shaped by a hard ~$20-25/month ceiling, and until
+# now nothing watched it. A budget with alerts costs nothing; it is off by
+# default only because creating one needs permissions on the billing account
+# (roles/billing.costsManager or similar), which a plain project owner may lack.
+# ---------------------------------------------------------------------------
+
+variable "billing_account_id" {
+  description = "Billing account ID (e.g. 000000-AAAAAA-BBBBBB) used to create a budget alert. Empty disables the budget."
+  type        = string
+  default     = ""
+}
+
+variable "budget_amount" {
+  description = "Monthly budget in budget_currency. Alerts fire at the thresholds below, they never cap spend."
+  type        = number
+  default     = 25
+}
+
+variable "budget_currency" {
+  description = "Currency code for budget_amount. Must match the billing account's currency."
+  type        = string
+  default     = "EUR"
+}
+
+variable "budget_alert_emails" {
+  description = <<-EOT
+    Extra addresses to notify. Empty means only the billing account admins and
+    project owners are notified, which is the default Cloud Billing behaviour
+    and is usually enough for a one-person project.
+  EOT
   type        = list(string)
   default     = []
 }

@@ -6,8 +6,10 @@ presupuesto de 20–25 $/mes.
 
 Este documento da la vista de conjunto. El detalle técnico de cada pieza —
 variables de Terraform, contrato de cada `Dockerfile`, comandos exactos— vive en
-[apps-y-servicios.md](apps-y-servicios.md); la justificación de por qué no hay
-balanceador ni VPC vive en [red-balanceador-y-vpc.md](red-balanceador-y-vpc.md).
+[apps-y-servicios.md](apps-y-servicios.md); el mapa completo de la configuración
+—qué se fija en build, qué en el apply y qué deriva Terraform— en
+[variables-de-entorno.md](variables-de-entorno.md); y la justificación de por qué
+no hay balanceador ni VPC en [red-balanceador-y-vpc.md](red-balanceador-y-vpc.md).
 
 ---
 
@@ -39,6 +41,75 @@ Cloud SQL (backend/job → base de datos, evita un conector de VPC Access de
 ~7 $/mes). El job de setup no está en el camino de ninguna petición: se lanza a
 mano cuando hay migraciones nuevas.
 
+### El mapa completo
+
+Lo anterior es solo el camino de una petición. Esto es todo lo que hay, con el
+mecanismo de cada conexión — que es lo que importa, porque cada flecha usa una
+forma distinta de autenticarse:
+
+```mermaid
+flowchart TB
+    browser(["Browser"])
+
+    subgraph gcp["Google Cloud · europe-west1"]
+        subgraph run["Cloud Run — every service scales to zero"]
+            fe["<b>frontend</b><br/>nginx + Vite SPA · port 80<br/>SA: trustex-dev-fe<br/><i>public invoker</i>"]
+            be["<b>backend</b><br/>Express + Prisma · port 8080<br/>SA: trustex-dev-be<br/><i>public invoker</i>"]
+            dss["<b>dss</b><br/>EU DSS on Tomcat · port 8080<br/>SA: trustex-dev-dss<br/><i>private — IAM only</i>"]
+            job["<b>setup</b> (Cloud Run Job)<br/>prisma migrate deploy<br/>SA: trustex-dev-setup<br/><i>run by hand</i>"]
+        end
+
+        sql[("<b>Cloud SQL</b><br/>PostgreSQL 18 · db-f1-micro<br/>no authorised networks")]
+        ar["<b>Artifact Registry</b><br/>frontend · backend · dss · setup"]
+        sm["<b>Secret Manager</b><br/>db-password — break-glass<br/><i>no service account reads it</i>"]
+        budget["<b>Billing budget</b><br/>alerts at 50 / 80 / 100 %<br/>and forecast"]
+    end
+
+    subgraph ext["Third-party APIs — called by the backend"]
+        chain["Blockchain RPC"]
+        ipfs["Pinata / IPFS"]
+        scantrust["Scantrust"]
+    end
+
+    mail(["Billing admins<br/>+ jrodriguez@cetim.es"])
+
+    browser -->|"HTTPS · managed cert on *.run.app"| fe
+    fe -->|"nginx proxy_pass /api/v1<br/>same origin · no CORS · no credentials"| be
+    be -->|"OIDC ID token<br/>roles/run.invoker"| dss
+    be -->|"Unix socket /cloudsql<br/>roles/cloudsql.client"| sql
+    job -->|"Unix socket /cloudsql<br/>roles/cloudsql.client"| sql
+
+    be --> chain
+    be --> ipfs
+    be --> scantrust
+
+    ar -.->|"image pull · roles/artifactregistry.reader"| run
+    budget -.->|"email"| mail
+
+    classDef publicSvc fill:#e8f4ff,stroke:#3b82f6,color:#0b2545
+    classDef privateSvc fill:#fff4e6,stroke:#f59e0b,color:#3d2600
+    classDef data fill:#eef7ee,stroke:#16a34a,color:#0f2e14
+    classDef outside fill:#f4f4f5,stroke:#a1a1aa,color:#27272a
+
+    class fe,be publicSvc
+    class dss,job privateSvc
+    class sql,ar,sm data
+    class browser,chain,ipfs,scantrust,mail outside
+```
+
+Cuatro cosas que el diagrama hace explícitas y conviene leer juntas:
+
+- **Solo el frontend recibe tráfico del navegador.** El backend es público a
+  nivel de IAM porque nginx le hace de proxy sin credenciales, no porque se
+  espere que alguien lo llame directamente. Su defensa real es la cookie JWT.
+- **DSS es la única pieza cerrada por IAM**, y la llamada del backend va firmada
+  con un ID token de OIDC. Es la flecha con mecanismo distinto a todas las demás.
+- **Nadie entra a la base de datos por red.** Las dos flechas que llegan a Cloud
+  SQL son sockets Unix del conector integrado de Cloud Run, no conexiones TCP.
+- **Secret Manager no tiene ninguna flecha entrante desde los servicios.** Guarda
+  una copia de la contraseña para acceso de emergencia, y ninguna cuenta de
+  servicio tiene permiso para leerla.
+
 ---
 
 ## 2. Los cuatro artefactos
@@ -55,7 +126,7 @@ etiqueta en Artifact Registry. Ninguno comparte cuenta de servicio con otro.
 
 Y las piezas gestionadas que los rodean:
 
-- **Cloud SQL** — Postgres 15 en `db-f1-micro`, disco HDD de 10 GB, una sola
+- **Cloud SQL** — Postgres 18 en `db-f1-micro`, disco HDD de 10 GB, una sola
   zona y copias de seguridad diarias con tres retenidas. Es la única pieza que
   cuesta dinero estando parada, y por eso es la que fija el suelo del
   presupuesto.
@@ -81,10 +152,9 @@ valor viejo no pueda apuntar la aplicación a una instancia equivocada.
   `?host=/cloudsql/<instancia>`. La leen tanto el pool del backend como
   `prisma migrate deploy` en el job, así que hay una sola cadena de conexión
   en todo el sistema.
-- **`BACKEND_URL` / `BACKEND_HOST`** — la URL del Cloud Run del backend,
-  entregada al frontend para que nginx sepa a dónde mandar `/api/v1`. Al ir
-  por el mismo origen, las cookies de sesión son de primera parte y no hay
-  CORS.
+- **`BACKEND_HOST`** — el host del Cloud Run del backend, entregado al frontend
+  para que nginx sepa a dónde mandar `/api/v1`. Al ir por el mismo origen, las
+  cookies de sesión son de primera parte y no hay CORS.
 - **`DSS_VALIDATION_URL`** — la URL del Cloud Run de DSS, entregada al
   backend. Es una llamada servidor a servidor dentro de la misma región: sin
   coste de red y sin salir a internet por una VPC.
@@ -181,10 +251,12 @@ etiquetas reales.
    Necesita la clave privada del equipo.
 2. `make tf-init tf-apply` — crea registro, base de datos, cuentas de servicio
    y los servicios con imágenes de prueba.
-3. `make dss-lotl-up` → `make dss-lotl-save` — pre-calienta el caché de listas
-   de confianza para que viaje dentro de la imagen de DSS.
-4. `make build-all push-all TAG=0.1.0` — construye y sube las cuatro
-   imágenes. La de DSS compila con Maven: 10–20 minutos la primera vez.
+3. En **`dss-validation-docker`**: `make lotl-up` → `make lotl-save` —
+   pre-calienta el caché de listas de confianza para que viaje dentro de la
+   imagen. Después `make build push TAG=0.0.1`, que compila con Maven: 10–20
+   minutos la primera vez.
+4. En **`trustex-web`**: `make build-all push-all TAG=0.0.1` — construye y sube
+   las otras tres imágenes.
 5. `make tf-apply` — segunda pasada, ya con las etiquetas reales en
    `terraform.tfvars`.
 6. `make db-setup` — lanza el job de migraciones. Se repite en cada
@@ -194,23 +266,21 @@ etiquetas reales.
 
 ---
 
-## 8. Dos cosas que faltan en el código
+## 8. Dos ajustes ya hechos en `trustex-web`
 
-La infraestructura está completa, pero hay dos piezas que solo se pueden
-arreglar en `trustex-web`. Conviene cerrarlas antes del primer despliegue
-real: sin la primera, la API no responde.
+La infraestructura por sí sola no bastaba: el código de la aplicación asumía
+un despliegue con `docker-compose`, no Cloud Run. Se corrigieron ambos
+directamente en `trustex-web` (documentado ahí en
+`docs/changes/2026-09-03.md`); el detalle técnico de cada uno está en
+[apps-y-servicios.md §2](apps-y-servicios.md#2-dos-ajustes-que-se-hicieron-en-trustex-web-para-esta-infraestructura).
 
-**nginx apunta al nombre de docker-compose (bloqueante).** La configuración
-del frontend manda `/api/v1` a `http://backend:4000` y reenvía la cabecera
-`Host` del propio frontend. En Cloud Run, que enruta precisamente por esa
-cabecera, eso devuelve un 404. Hay que generar la configuración al arrancar el
-contenedor a partir del `BACKEND_HOST` que Terraform ya inyecta.
-Síntoma: la SPA carga, pero toda llamada a la API da 502.
+**El proxy de nginx ya no apunta a docker-compose.** Mandaba `/api/v1` a
+`http://backend:4000` y reenviaba la cabecera `Host` del propio frontend, que
+en Cloud Run devolvía un 404. Ahora la configuración se genera al arrancar el
+contenedor a partir del `BACKEND_HOST` que Terraform inyecta.
 
-**El backend llama a DSS sin identificarse (bloqueante).** Con DSS cerrado
-por IAM, el cliente tiene que mandar un ID token de OIDC. Terraform ya le ha
-dado el permiso a la cuenta de servicio del backend; falta que el código lo
-pida al servidor de metadatos — unas pocas líneas con `google-auth-library`,
-sin credenciales escritas en el repositorio.
-Síntoma: la validación de firmas responde 403. Apaño temporal: abrir DSS al
-público (`dss_public_invoker = true`).
+**El backend ya se identifica ante DSS.** Con DSS cerrado por IAM
+(`dss_public_invoker = false`), el cliente manda un ID token de OIDC obtenido
+con `google-auth-library`, sin credenciales escritas en el repositorio. En
+local, contra el `docker-compose` de `dss-validation-docker` sin IAM delante,
+sigue funcionando igual que antes.

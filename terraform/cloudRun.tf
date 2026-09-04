@@ -6,6 +6,22 @@
 # Request path: browser -> frontend (nginx) -> /api/v1 -> backend -> DSS + Cloud SQL.
 # The SPA never calls the backend cross-origin; nginx proxies it same-origin.
 
+locals {
+  # Without this, enabling the load balancer would buy nothing: the services
+  # would keep answering on their own *.run.app URLs, so anyone could reach them
+  # directly and bypass the LB — and with it the managed certificate, the URL
+  # map and anything later put in front (Cloud Armor, IAP). Closing ingress to
+  # the load balancer is what makes it the only way in.
+  #
+  # Only for frontend and backend: DSS is never behind the LB, and its own
+  # ingress must stay open because the backend calls it over the internet with
+  # an ID token, not through the load balancer.
+  #
+  # Note this is incompatible with domainMapping.tf, which needs direct ingress.
+  # The two are alternatives, as their respective comments already say.
+  cloudrun_ingress = local.lb_enabled ? "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER" : "INGRESS_TRAFFIC_ALL"
+}
+
 # ---------------------------------------------------------------------------
 # Frontend — React/Vite SPA built to static files and served by nginx.
 # The image is nginx:1.27-alpine listening on :80 (frontend/Dockerfile), not a
@@ -16,7 +32,7 @@
 resource "google_cloud_run_v2_service" "frontend" {
   name     = "${local.name_prefix}-frontend"
   location = var.region
-  ingress  = "INGRESS_TRAFFIC_ALL"
+  ingress  = local.cloudrun_ingress
   labels   = local.common_labels
 
   template {
@@ -43,9 +59,9 @@ resource "google_cloud_run_v2_service" "frontend" {
         startup_cpu_boost = true
       }
 
-      # BACKEND_URL / BACKEND_HOST: nginx must resolve /api/v1 to the backend.
-      # The frontend image needs to render its nginx config from these at start
-      # up — see docs/apps-y-servicios.md ("El proxy /api/v1 en Cloud Run").
+      # BACKEND_HOST: nginx must resolve /api/v1 to the backend, and renders its
+      # config from this at start up — see docs/apps-y-servicios.md
+      # ("El proxy /api/v1 en Cloud Run").
       dynamic "env" {
         for_each = local.frontend_service_env
         content {
@@ -88,7 +104,7 @@ resource "google_cloud_run_v2_service" "frontend" {
 resource "google_cloud_run_v2_service" "backend" {
   name     = "${local.name_prefix}-backend"
   location = var.region
-  ingress  = "INGRESS_TRAFFIC_ALL"
+  ingress  = local.cloudrun_ingress
   labels   = local.common_labels
 
   template {
@@ -96,12 +112,24 @@ resource "google_cloud_run_v2_service" "backend" {
 
     # Blockchain writes and IPFS pinning are slow; the default 300s is plenty
     # but leaves a long tail of billable time on a hung request.
-    timeout = "120s"
+    #
+    # It cannot be shorter than what DSS needs, though: this is the outer
+    # deadline of a signature validation, and in Mode A a DSS cold start alone
+    # is 40-90s. At 120s the caller would be cut off before DSS ever answered,
+    # and the failure would look like a backend bug. So the budget follows the
+    # DSS mode, exactly as the DSS service's own timeout does.
+    timeout = local.dss_always_on ? "120s" : "300s"
 
     scaling {
       min_instance_count = 0
       max_instance_count = 2
     }
+
+    # The default is 80, which for 512Mi running Node + Prisma + blockchain and
+    # IPFS calls is optimistic: 80 in-flight requests share one small heap and
+    # one connection pool, against a Cloud SQL instance capped at 50 connections.
+    # 40 x 2 instances is still far more than this workload will see.
+    max_instance_request_concurrency = 40
 
     # Built-in Cloud SQL connector (Unix socket at /cloudsql/INSTANCE)
     volumes {
@@ -160,6 +188,41 @@ resource "google_cloud_run_v2_service" "backend" {
   traffic {
     type    = "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST"
     percent = 100
+  }
+
+  # The same three conditions locals.tf asserts in `check` blocks, repeated here
+  # as preconditions because a `check` only ever produces a warning: the apply
+  # succeeds, and the breakage surfaces minutes later as a revision that fails
+  # its health check with "Invalid environment variables" buried in the logs.
+  # These are exactly the mistakes worth refusing to deploy over, so they belong
+  # on the resource that would break. The checks stay for `terraform plan`,
+  # where they report all the problems at once instead of the first one.
+  lifecycle {
+    precondition {
+      condition = length(local.backend_missing_env) == 0
+      error_message = join(" ", [
+        "terraform/secrets/backend is missing values required by backend/src/config/env.ts:",
+        join(", ", local.backend_missing_env),
+        "- the revision would fail to start. Run `make secrets-decrypt` and see terraform/secrets/backend.example.",
+      ])
+    }
+
+    precondition {
+      condition = length(local.backend_reserved_env_used) == 0
+      error_message = join(" ", [
+        "terraform/secrets/backend declares env vars reserved by Cloud Run:",
+        join(", ", local.backend_reserved_env_used),
+        "- the revision would be rejected. PORT comes from ports.container_port.",
+      ])
+    }
+
+    precondition {
+      condition = (
+        lookup(local.secrets_backend, "WALLET_ENCRYPTION_KEY", "") == "" ||
+        length(local.secrets_backend["WALLET_ENCRYPTION_KEY"]) == 64
+      )
+      error_message = "WALLET_ENCRYPTION_KEY must be 64 hex chars (32 bytes), as required by backend/src/config/env.ts."
+    }
   }
 
   # A revision is only healthy once it can pull its image and reach the database,
@@ -252,13 +315,10 @@ resource "google_cloud_run_v2_service" "dss" {
         startup_cpu_boost = true
       }
 
-      dynamic "env" {
-        for_each = local.dss_service_env
-        content {
-          name  = env.key
-          value = env.value
-        }
-      }
+      # No env block on purpose. The service's own deployment guide states that
+      # it requires no environment variable, and CATALINA_OPTS in particular must
+      # be left alone so the image can size the JVM heap from the memory limit
+      # above. Its behaviour is steered from var.dss_min_instances instead.
 
       # /health, not /health/ready. Cloud Run has no separate readiness concept,
       # so the 503 that /health/ready returns while the trusted lists load would
@@ -320,9 +380,8 @@ resource "google_cloud_run_v2_service_iam_member" "backend_public" {
   member   = "allUsers"
 }
 
-# The only invoker DSS should need. The backend must present an OIDC ID token
-# whose aud is the DSS URL — see docs/apps-y-servicios.md for the client change
-# that is still pending in trustex-web.
+# The only invoker DSS needs. The backend presents an OIDC ID token whose aud is
+# the DSS URL, minted in trustex-web's dss-client.ts — see docs/apps-y-servicios.md.
 resource "google_cloud_run_v2_service_iam_member" "dss_backend" {
   project  = google_cloud_run_v2_service.dss.project
   location = google_cloud_run_v2_service.dss.location

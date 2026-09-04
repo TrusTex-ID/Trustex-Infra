@@ -4,14 +4,17 @@ environment = "dev"
 region = "europe-west1"
 zone   = "europe-west1-b"
 
-debug = false
-
 # --- Imagenes ---------------------------------------------------------------
 # Una etiqueta por Dockerfile. Ver `make images` para los cuatro builds.
-frontend_tag = "latest" # trustex-web/frontend      (Vite SPA + nginx)
-backend_tag  = "latest" # trustex-web/backend       (Express + Prisma)
-dss_tag      = "latest" # dss-validation-docker     (EU DSS sobre Tomcat)
-setup_tag    = "latest" # trustex-web/setup         (job de migraciones)
+# Tags inmutables, nunca `latest` (Terraform lo rechaza). El tag es lo que hace
+# que se despliegue una revision nueva: Cloud Run fija la cadena de la imagen en
+# la plantilla, asi que con un tag mutable Terraform no ve cambio y no despliega
+# nada, por mucho que hayas subido la imagen. Deben coincidir con lo que subes:
+#   make build-all push-all TAG=0.0.2
+frontend_tag = "0.0.1" # trustex-web/frontend      (Vite SPA + nginx)
+backend_tag  = "0.0.1" # trustex-web/backend       (Express + Prisma)
+dss_tag      = "0.0.1" # dss-validation-docker     (EU DSS sobre Tomcat)
+setup_tag    = "0.0.1" # trustex-web/setup         (job de migraciones)
 
 # --- Primer apply -----------------------------------------------------------
 # El registry esta vacio hasta que subas las imagenes, asi que el primer apply
@@ -25,9 +28,10 @@ setup_tag    = "latest" # trustex-web/setup         (job de migraciones)
 # setup_image    = "us-docker.pkg.dev/cloudrun/container/hello"
 
 # --- Frontend ---------------------------------------------------------------
-# VITE_DPP_BASE_URL se incrusta en el bundle en tiempo de build; lo usa
-# `make build-frontend` como --build-arg, no es una env var de Cloud Run.
-frontend_dpp_base_url = "https://dpp.trustex.eu"
+# VITE_DPP_BASE_URL no se configura aqui. Vite la incrusta en el bundle en
+# tiempo de build, asi que Terraform no puede cambiarla: es un --build-arg y su
+# unica fuente es DPP_BASE_URL en el Makefile.
+#   make build-frontend DPP_BASE_URL=https://otro.dominio.eu
 
 # Origen publico del frontend, que el backend recibe como FRONTEND_URL (CORS).
 # Solo hace falta si algo llama al backend cross-origin; la SPA usa el proxy
@@ -41,11 +45,11 @@ setup_run_seed       = false
 # --- DSS --------------------------------------------------------------------
 # Privado por defecto, como manda la guia del propio servicio: la imagen sirve
 # tambien UI web, Swagger, SOAP y /server-sign/**, que firma con un keystore de
-# demo con contrasena publica. Solo la SA del backend deberia invocarlo.
+# demo con contrasena publica. Solo la SA del backend lo invoca.
 #
-# OJO: eso exige que backend/src/verification/dss-client.ts mande un ID token de
-# OIDC, cosa que hoy NO hace. Mientras siga con un fetch pelado, ponlo en true o
-# la validacion de firmas responde 403. Ver docs/apps-y-servicios.md.
+# El backend ya firma la llamada: dss-client.ts consigue un ID token de OIDC con
+# google-auth-library y lo manda en Authorization. No hace falta abrir DSS al
+# publico; true queda solo como apano de depuracion. Ver docs/apps-y-servicios.md.
 dss_public_invoker = false
 
 # 0 = Modo A: escala a cero, CPU limitada entre peticiones. Practicamente
@@ -61,3 +65,16 @@ dss_min_instances = 0
 # --- Balanceador global (+~18 $/mes, se sale del presupuesto) ---------------
 # enable_load_balancer = true
 # lb_domains           = ["app.trustex.eu"]
+
+# --- Presupuesto de facturación (gratis, solo avisa) ------------------------
+# Crear el presupuesto exige un rol sobre la CUENTA DE FACTURACION
+# (roles/billing.costsManager), no basta con ser owner del proyecto. Vacio =
+# desactivado. Obten el ID con:
+#   gcloud billing projects describe <project_id> \
+#     --format='value(billingAccountName)'
+#
+# Avisa al 50%, 80%, 100% y 100% previsto. Nunca limita el gasto.
+# billing_account_id  = "000000-AAAAAA-BBBBBB"
+# budget_amount       = 25
+# budget_currency     = "EUR"
+# budget_alert_emails = []   # vacio = avisa a admins de facturacion y owners
