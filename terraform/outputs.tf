@@ -54,11 +54,6 @@ output "database_url" {
   sensitive   = true
 }
 
-output "db_password_secret_id" {
-  description = "Secret Manager secret ID holding a copy of DB_PASSWORD from terraform/secrets/postgres."
-  value       = google_secret_manager_secret.db_password.secret_id
-}
-
 output "frontend_service_account" {
   description = "Service account email used by the frontend Cloud Run service."
   value       = google_service_account.frontend.email

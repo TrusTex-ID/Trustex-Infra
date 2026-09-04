@@ -61,7 +61,6 @@ flowchart TB
 
         sql[("<b>Cloud SQL</b><br/>PostgreSQL 18 · db-f1-micro<br/>no authorised networks")]
         ar["<b>Artifact Registry</b><br/>frontend · backend · dss · setup"]
-        sm["<b>Secret Manager</b><br/>db-password — break-glass<br/><i>no service account reads it</i>"]
         budget["<b>Billing budget</b><br/>alerts at 50 / 80 / 100 %<br/>and forecast"]
     end
 
@@ -93,11 +92,15 @@ flowchart TB
 
     class fe,be publicSvc
     class dss,job privateSvc
-    class sql,ar,sm data
+    class sql,ar data
     class browser,chain,ipfs,scantrust,mail outside
 ```
 
 Cuatro cosas que el diagrama hace explícitas y conviene leer juntas:
+
+- **No aparece Secret Manager.** Terraform no gestiona ningún secreto: la
+  contraseña llega a los servicios dentro de `DATABASE_URL`, y `make secrets-push`
+  sube ficheros a Secret Manager a mano cuando hace falta, al margen del `apply`.
 
 - **Solo el frontend recibe tráfico del navegador.** El backend es público a
   nivel de IAM porque nginx le hace de proxy sin credenciales, no porque se
@@ -106,9 +109,8 @@ Cuatro cosas que el diagrama hace explícitas y conviene leer juntas:
   con un ID token de OIDC. Es la flecha con mecanismo distinto a todas las demás.
 - **Nadie entra a la base de datos por red.** Las dos flechas que llegan a Cloud
   SQL son sockets Unix del conector integrado de Cloud Run, no conexiones TCP.
-- **Secret Manager no tiene ninguna flecha entrante desde los servicios.** Guarda
-  una copia de la contraseña para acceso de emergencia, y ninguna cuenta de
-  servicio tiene permiso para leerla.
+- **La única flecha punteada hacia fuera es la del presupuesto.** No mueve
+  tráfico: son los avisos por correo cuando el gasto cruza un umbral.
 
 ---
 
@@ -133,8 +135,8 @@ Y las piezas gestionadas que los rodean:
 - **Artifact Registry** — un repositorio Docker con política de limpieza:
   conserva las cinco versiones más recientes y borra lo no etiquetado a los 30
   días.
-- **Secret Manager** — guarda una copia de la contraseña de la base de datos
-  para acceso de emergencia.
+- **Secret Manager** — habilitado pero **no gestionado por Terraform**: lo usa
+  `make secrets-push` para subir un fichero de secretos a mano cuando hace falta.
 - **Certificados y dominio** — Cloud Run ya da HTTPS con certificado
   gestionado en `*.run.app`. Un dominio propio se enchufa con un domain
   mapping, que también es gratis y es la razón de estar en `europe-west1`.

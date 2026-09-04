@@ -196,8 +196,10 @@ Cambiar `DB_PASSWORD` y aplicar rota la clave en Cloud SQL y en los servicios a
 la vez. `DB_NAME` y `DB_USER` no se pueden cambiar sin recrear la base y el
 usuario.
 
-Terraform guarda además una copia de `DB_PASSWORD` en Secret Manager como
-break-glass. Ningún servicio la lee de ahí.
+Terraform **no** guarda `DB_PASSWORD` en Secret Manager. Llegó a hacerlo como
+copia break-glass, pero nadie la leía y obligaba a tener permiso de lectura de
+secretos solo para poder ejecutar un `plan`. Si quieres subir un secreto a mano,
+`make secrets-push FILE=postgres SECRET=<nombre>` lo hace al margen del `apply`.
 
 ---
 

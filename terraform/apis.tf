@@ -6,6 +6,8 @@ resource "google_project_service" "services" {
     "artifactregistry.googleapis.com",
     "run.googleapis.com",
     "sqladmin.googleapis.com",
+    # Not for Terraform, which manages no secret: this is for `make secrets-push`,
+    # which uploads a secrets file to a named secret by hand.
     "secretmanager.googleapis.com",
     "iam.googleapis.com",
     "iamcredentials.googleapis.com",

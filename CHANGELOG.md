@@ -190,6 +190,39 @@ solo se detiene en la precondición que exige rellenar los ficheros de secretos.
   —todavía por delante de local, así que en ese caso hay que mover el
   `docker-compose.yml` a 17 y no volver a 15. Está anotado en `database.tf`.
 
+### Corregido (tras el primer apply real)
+
+El primer `apply` creó Cloud SQL, las cuentas de servicio, Artifact Registry y
+las APIs, pero falló en ocho recursos. Tres causas distintas:
+
+- **`billing_project` + `user_project_override` en los dos providers.** El
+  presupuesto fallaba con un 403 cuyo `consumer` era `projects/764086051850` —el
+  proyecto compartido por defecto de gcloud— en lugar del propio. Algunas APIs,
+  `billingbudgets` entre ellas, rechazan una llamada hecha con credenciales de
+  usuario si no se les dice a qué proyecto imputar la cuota. Tener el
+  `quota_project_id` en las ADC no basta: el provider tiene que enviarlo.
+
+- **Eliminado `secrets.tf`** y su output `db_password_secret_id`. Guardaba una
+  copia de `DB_PASSWORD` en Secret Manager como break-glass, pero:
+
+  - ninguna cuenta de servicio tenía permiso para leerla (ya se anotó en la
+    primera revisión),
+  - `secretmanager.versions.access` está deliberadamente excluido de los roles
+    básicos de GCP, así que con `roles/editor` el refresco de la versión
+    devolvía 403 **y abortaba el `plan` entero**, no solo ese recurso,
+  - la contraseña ya vive en el fichero cifrado con `age`, en el estado de
+    Terraform y en la propia `DATABASE_URL`; esta era la cuarta copia y la única
+    que rompía nada.
+
+  La API `secretmanager.googleapis.com` **se conserva**: la usa
+  `make secrets-push`, que sube ficheros a secretos con nombre propio y es
+  independiente de Terraform.
+
+  La versión ya existía en el estado, así que hubo que sacarla con
+  `terraform state rm` antes de poder planificar: su refresco fallaba antes de
+  llegar a planificar su propio borrado. Al destruir el secreto padre, GCP
+  elimina también sus versiones.
+
 ### Corregido (segunda pasada)
 
 - **Una IP global reservada y ociosa cuando el balanceador estaba a medio
