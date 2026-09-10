@@ -42,6 +42,21 @@ resource "google_monitoring_notification_channel" "budget_email" {
   depends_on = [time_sleep.api_propagation]
 }
 
+# The budget filter needs the project NUMBER, not its ID. Both identify the same
+# project and the API accepts either, but it stores and returns the number — so
+# writing "projects/${var.project_id}" leaves a diff that every `terraform plan`
+# reports and no `apply` can ever settle:
+#
+#   ~ projects = [
+#       - "projects/982028874044",
+#       + "projects/project-4894bbdc-540f-48c0-ac5",
+#     ]
+#
+# Looked up rather than hardcoded so the number still follows var.project_id.
+data "google_project" "main" {
+  project_id = var.project_id
+}
+
 resource "google_billing_budget" "main" {
   count = local.budget_enabled ? 1 : 0
 
@@ -50,7 +65,7 @@ resource "google_billing_budget" "main" {
 
   # Scoped to this project only, so a shared billing account is not measured.
   budget_filter {
-    projects               = ["projects/${var.project_id}"]
+    projects               = ["projects/${data.google_project.main.number}"]
     calendar_period        = "MONTH"
     credit_types_treatment = "INCLUDE_ALL_CREDITS"
   }
