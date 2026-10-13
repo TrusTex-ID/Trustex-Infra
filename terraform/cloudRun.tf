@@ -233,6 +233,7 @@ resource "google_cloud_run_v2_service" "backend" {
     google_artifact_registry_repository.main,
     google_project_iam_member.backend_ar_reader,
     google_project_iam_member.backend_cloudsql_client,
+    google_project_iam_member.backend_aiplatform_user,
     google_sql_database.app,
     google_sql_user.app,
   ]

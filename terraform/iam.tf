@@ -46,6 +46,14 @@ resource "google_project_iam_member" "setup_cloudsql_client" {
   member  = "serviceAccount:${google_service_account.setup.email}"
 }
 
+# Vertex AI User — lets the backend call Vertex AI models (Gemini, embeddings)
+# through Application Default Credentials, with no key file.
+resource "google_project_iam_member" "backend_aiplatform_user" {
+  project = var.project_id
+  role    = "roles/aiplatform.user"
+  member  = "serviceAccount:${google_service_account.backend.email}"
+}
+
 # Allow Cloud Run to pull images from Artifact Registry.
 resource "google_project_iam_member" "frontend_ar_reader" {
   project = var.project_id

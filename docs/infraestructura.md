@@ -62,6 +62,7 @@ flowchart TB
         sql[("<b>Cloud SQL</b><br/>PostgreSQL 18 · db-f1-micro<br/>no authorised networks")]
         ar["<b>Artifact Registry</b><br/>frontend · backend · dss · setup"]
         budget["<b>Billing budget</b><br/>alerts at 50 / 80 / 100 %<br/>and forecast"]
+        vertex["<b>Vertex AI</b><br/>pay per request"]
     end
 
     subgraph ext["Third-party APIs — called by the backend"]
@@ -77,6 +78,7 @@ flowchart TB
     be -->|"OIDC ID token<br/>roles/run.invoker"| dss
     be -->|"Unix socket /cloudsql<br/>roles/cloudsql.client"| sql
     job -->|"Unix socket /cloudsql<br/>roles/cloudsql.client"| sql
+    be -->|"ADC · roles/aiplatform.user"| vertex
 
     be --> chain
     be --> ipfs
@@ -92,7 +94,7 @@ flowchart TB
 
     class fe,be publicSvc
     class dss,job privateSvc
-    class sql,ar data
+    class sql,ar,vertex data
     class browser,chain,ipfs,scantrust,mail outside
 ```
 

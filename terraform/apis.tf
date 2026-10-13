@@ -14,6 +14,8 @@ resource "google_project_service" "services" {
     "cloudresourcemanager.googleapis.com",
     # Needed by the optional load balancer and by Cloud Run domain mapping.
     "compute.googleapis.com",
+    # Vertex AI, called by the backend with its runtime service account.
+    "aiplatform.googleapis.com",
     ],
     # Only reachable when a billing budget is actually requested: enabling it
     # needs billing-account permissions that a plain project owner may not have.
