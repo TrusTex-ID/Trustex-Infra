@@ -1,4 +1,4 @@
-# Encrypt / decrypt terraform/secrets with age (Windows).
+# Encrypt / decrypt the secrets, tfvars and tfstate under terraform/ with age (Windows).
 # Requires: age  ->  winget install FiloSottile.age
 #
 #   .\scripts\secrets.ps1 keygen
@@ -20,12 +20,14 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
-$SecretsDir = Join-Path $Root "terraform\secrets"
+$TerraformDir = Join-Path $Root "terraform"
+$SecretsDir = Join-Path $TerraformDir "secrets"
 $AgeKey = Join-Path $SecretsDir ".age.key"
 $AgePub = Join-Path $SecretsDir ".age.pubkey"
 
-# The only files that get encrypted. Add a new secret file here to include it.
-$ManagedFiles = @("backend", "postgres")
+# The only files that get encrypted, relative to terraform/. Add a new one here
+# and in scripts/secrets.sh, and un-ignore its .age in .gitignore.
+$ManagedFiles = @("secrets/backend", "secrets/postgres", "terraform.tfvars", "terraform.tfstate")
 
 $script:AgeExe = $null
 $script:AgeKeygenExe = $null
@@ -80,7 +82,24 @@ function Get-AgeKeygenExe {
 
 function Get-PlaintextPath {
     param([string]$Name)
-    return (Join-Path $SecretsDir $Name)
+    return (Join-Path $TerraformDir $Name)
+}
+
+# age output is randomised, so re-encrypting identical content still changes the
+# .age. Comparing against the decrypted copy is the only way to tell whether the
+# plaintext actually differs. $null means it cannot be told (no private key).
+function Test-MatchesEncrypted {
+    param([string]$Path)
+    if (-not (Test-Path $AgeKey)) { return $null }
+    $tmp = [System.IO.Path]::GetTempFileName()
+    try {
+        & (Get-AgeExe) -d -i $AgeKey -o $tmp "$Path.age"
+        if ($LASTEXITCODE -ne 0) { throw "age decrypt failed for $Path.age" }
+        return ((Get-FileHash $tmp).Hash -eq (Get-FileHash $Path).Hash)
+    }
+    finally {
+        Remove-Item -Force $tmp -ErrorAction SilentlyContinue
+    }
 }
 
 function Invoke-Keygen {
@@ -113,13 +132,17 @@ function Invoke-Encrypt {
             Write-Host "skip     $name (not found)"
             continue
         }
+        if ((Test-Path "$path.age") -and (Test-MatchesEncrypted $path)) {
+            Write-Host "same     $name (unchanged)"
+            continue
+        }
         Write-Host "encrypt  $name -> $name.age"
         & $age -e -R $AgePub -o "$path.age" $path
         if ($LASTEXITCODE -ne 0) { throw "age encrypt failed for $name" }
         $count++
     }
     if ($count -eq 0) {
-        Write-Host "Nothing to encrypt. Expected: $($ManagedFiles -join ', ') in terraform\secrets\"
+        Write-Host "Nothing new to encrypt. Managed under terraform\: $($ManagedFiles -join ', ')"
     }
     else {
         Write-Host "Encrypted $count file(s). Commit only *.age - plaintext stays local."
@@ -133,18 +156,30 @@ function Invoke-Decrypt {
     }
     $count = 0
     foreach ($name in $ManagedFiles) {
-        $enc = (Get-PlaintextPath $name) + ".age"
+        $path = Get-PlaintextPath $name
+        $enc = "$path.age"
         if (-not (Test-Path $enc)) {
             Write-Host "skip     $name.age (not found)"
             continue
         }
+        # A local copy that differs may be newer than the committed one (a
+        # tfstate after an apply that was never encrypted). Never overwrite it.
+        if (Test-Path $path) {
+            if (Test-MatchesEncrypted $path) {
+                Write-Host "same     $name (already up to date)"
+            }
+            else {
+                Write-Host "skip     $name (local copy differs from $name.age - encrypt it, or delete it to take the committed one)"
+            }
+            continue
+        }
         Write-Host "decrypt  $name.age -> $name"
-        & $age -d -i $AgeKey -o (Get-PlaintextPath $name) $enc
+        & $age -d -i $AgeKey -o $path $enc
         if ($LASTEXITCODE -ne 0) { throw "age decrypt failed for $name.age" }
         $count++
     }
     if ($count -eq 0) {
-        Write-Host "No *.age files to decrypt in terraform\secrets\"
+        Write-Host "Nothing decrypted."
     }
     else {
         Write-Host "Decrypted $count file(s)."
@@ -156,30 +191,47 @@ function Invoke-Clean {
     foreach ($name in $ManagedFiles) {
         $path = Get-PlaintextPath $name
         if (-not (Test-Path $path)) { continue }
-        if (Test-Path "$path.age") {
+        if (-not (Test-Path "$path.age")) {
+            Write-Host "skip     $name (no $name.age - encrypt first)"
+            continue
+        }
+        $same = Test-MatchesEncrypted $path
+        if ($null -eq $same) {
+            Write-Host "skip     $name (no private key to check $name.age is current)"
+        }
+        elseif (-not $same) {
+            Write-Host "skip     $name (differs from $name.age - encrypt first)"
+        }
+        else {
             Write-Host "remove   $name"
             Remove-Item -Force $path
             $count++
-        }
-        else {
-            Write-Host "skip     $name (no $name.age - encrypt first)"
         }
     }
     Write-Host "Removed $count plaintext file(s)."
 }
 
 function Invoke-Status {
-    Write-Host "=== $SecretsDir ==="
+    Write-Host "=== $TerraformDir ==="
     if (Test-Path $AgeKey) { Write-Host "private key: present" } else { Write-Host "private key: MISSING (run: make secrets-keygen)" }
     if (Test-Path $AgePub) { Write-Host "public key:  present" } else { Write-Host "public key:  MISSING (run: make secrets-keygen)" }
     Write-Host ""
-    Write-Host "file        plaintext  encrypted"
-    Write-Host "----        ---------  ---------"
+    Write-Host ("{0,-19} {1,-10} {2}" -f "file", "plaintext", "encrypted")
+    Write-Host ("{0,-19} {1,-10} {2}" -f "----", "---------", "---------")
     foreach ($name in $ManagedFiles) {
         $path = Get-PlaintextPath $name
-        $plain = if (Test-Path $path) { "yes" } else { "no " }
-        $enc = if (Test-Path "$path.age") { "yes" } else { "no" }
-        Write-Host ("{0,-11} {1,-10} {2}" -f $name, $plain, $enc)
+        $hasPlain = Test-Path $path
+        $hasEnc = Test-Path "$path.age"
+        $plain = if ($hasPlain) { "yes" } else { "no" }
+        $enc = if (-not $hasEnc) { "no" }
+        elseif (-not $hasPlain) { "yes" }
+        else {
+            $same = Test-MatchesEncrypted $path
+            if ($null -eq $same) { "yes (unverified)" }
+            elseif ($same) { "yes" }
+            else { "STALE (run make secrets-encrypt)" }
+        }
+        Write-Host ("{0,-19} {1,-10} {2}" -f $name, $plain, $enc)
     }
     Write-Host ""
     Write-Host "Only *.age files are committed. Plaintext is gitignored."
@@ -211,7 +263,7 @@ function Invoke-Push {
 
 function Show-Help {
     @"
-Secrets (age) - encrypts: $($ManagedFiles -join ', ')
+Secrets (age) - encrypts, under terraform\: $($ManagedFiles -join ', ')
 
   make secrets-keygen
   make secrets-encrypt

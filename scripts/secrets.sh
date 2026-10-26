@@ -1,6 +1,7 @@
 #!/bin/sh
-# Encrypt / decrypt terraform/secrets with age (Linux / macOS / CI).
-# Windows uses scripts/secrets.ps1 instead. The Makefile picks the right one.
+# Encrypt / decrypt the secrets, tfvars and tfstate under terraform/ with age
+# (Linux / macOS / CI). Windows uses scripts/secrets.ps1 instead. The Makefile
+# picks the right one.
 #
 #   ./scripts/secrets.sh keygen
 #   ./scripts/secrets.sh encrypt
@@ -12,12 +13,14 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-SECRETS_DIR="$ROOT/terraform/secrets"
+TERRAFORM_DIR="$ROOT/terraform"
+SECRETS_DIR="$TERRAFORM_DIR/secrets"
 AGE_KEY="$SECRETS_DIR/.age.key"
 AGE_PUB="$SECRETS_DIR/.age.pubkey"
 
-# The only files that get encrypted. Add a new secret file here to include it.
-MANAGED_FILES="backend postgres"
+# The only files that get encrypted, relative to terraform/. Add a new one here
+# and in scripts/secrets.ps1, and un-ignore its .age in .gitignore.
+MANAGED_FILES="secrets/backend secrets/postgres terraform.tfvars terraform.tfstate"
 
 die() {
     echo "ERROR: $1" >&2
@@ -27,6 +30,19 @@ die() {
 require_age() {
     command -v age >/dev/null 2>&1 ||
         die "age not found. Install: https://github.com/FiloSottile/age#installation"
+}
+
+# age output is randomised, so re-encrypting identical content still changes the
+# .age. Comparing against the decrypted copy is the only way to tell whether the
+# plaintext actually differs. Prints same / differs / unknown (no private key).
+compare_encrypted() {
+    if [ ! -f "$AGE_KEY" ]; then
+        echo unknown
+    elif age -d -i "$AGE_KEY" "$1.age" | cmp -s - "$1"; then
+        echo same
+    else
+        echo differs
+    fi
 }
 
 cmd_keygen() {
@@ -47,9 +63,13 @@ cmd_encrypt() {
     [ -f "$AGE_PUB" ] || die "Missing $AGE_PUB. Run: make secrets-keygen"
     count=0
     for name in $MANAGED_FILES; do
-        path="$SECRETS_DIR/$name"
+        path="$TERRAFORM_DIR/$name"
         if [ ! -f "$path" ]; then
             echo "skip     $name (not found)"
+            continue
+        fi
+        if [ -f "$path.age" ] && [ "$(compare_encrypted "$path")" = same ]; then
+            echo "same     $name (unchanged)"
             continue
         fi
         echo "encrypt  $name -> $name.age"
@@ -57,7 +77,7 @@ cmd_encrypt() {
         count=$((count + 1))
     done
     if [ "$count" -eq 0 ]; then
-        echo "Nothing to encrypt. Expected: $MANAGED_FILES in terraform/secrets/"
+        echo "Nothing new to encrypt. Managed under terraform/: $MANAGED_FILES"
     else
         echo "Encrypted $count file(s). Commit only *.age - plaintext stays local."
     fi
@@ -68,9 +88,19 @@ cmd_decrypt() {
     [ -f "$AGE_KEY" ] || die "Missing private key $AGE_KEY. Restore it before decrypting."
     count=0
     for name in $MANAGED_FILES; do
-        path="$SECRETS_DIR/$name"
+        path="$TERRAFORM_DIR/$name"
         if [ ! -f "$path.age" ]; then
             echo "skip     $name.age (not found)"
+            continue
+        fi
+        # A local copy that differs may be newer than the committed one (a
+        # tfstate after an apply that was never encrypted). Never overwrite it.
+        if [ -f "$path" ]; then
+            if [ "$(compare_encrypted "$path")" = same ]; then
+                echo "same     $name (already up to date)"
+            else
+                echo "skip     $name (local copy differs from $name.age - encrypt it, or delete it to take the committed one)"
+            fi
             continue
         fi
         echo "decrypt  $name.age -> $name"
@@ -78,7 +108,7 @@ cmd_decrypt() {
         count=$((count + 1))
     done
     if [ "$count" -eq 0 ]; then
-        echo "No *.age files to decrypt in terraform/secrets/"
+        echo "Nothing decrypted."
     else
         echo "Decrypted $count file(s)."
     fi
@@ -87,31 +117,47 @@ cmd_decrypt() {
 cmd_clean() {
     count=0
     for name in $MANAGED_FILES; do
-        path="$SECRETS_DIR/$name"
+        path="$TERRAFORM_DIR/$name"
         [ -f "$path" ] || continue
-        if [ -f "$path.age" ]; then
+        if [ ! -f "$path.age" ]; then
+            echo "skip     $name (no $name.age - encrypt first)"
+            continue
+        fi
+        case "$(compare_encrypted "$path")" in
+        same)
             echo "remove   $name"
             rm -f "$path"
             count=$((count + 1))
-        else
-            echo "skip     $name (no $name.age - encrypt first)"
-        fi
+            ;;
+        differs) echo "skip     $name (differs from $name.age - encrypt first)" ;;
+        *) echo "skip     $name (no private key to check $name.age is current)" ;;
+        esac
     done
     echo "Removed $count plaintext file(s)."
 }
 
 cmd_status() {
-    echo "=== $SECRETS_DIR ==="
+    echo "=== $TERRAFORM_DIR ==="
     if [ -f "$AGE_KEY" ]; then echo "private key: present"; else echo "private key: MISSING (run: make secrets-keygen)"; fi
     if [ -f "$AGE_PUB" ]; then echo "public key:  present"; else echo "public key:  MISSING (run: make secrets-keygen)"; fi
     echo ""
-    printf '%-11s %-10s %s\n' "file" "plaintext" "encrypted"
-    printf '%-11s %-10s %s\n' "----" "---------" "---------"
+    printf '%-19s %-10s %s\n' "file" "plaintext" "encrypted"
+    printf '%-19s %-10s %s\n' "----" "---------" "---------"
     for name in $MANAGED_FILES; do
-        path="$SECRETS_DIR/$name"
+        path="$TERRAFORM_DIR/$name"
         if [ -f "$path" ]; then plain="yes"; else plain="no"; fi
-        if [ -f "$path.age" ]; then enc="yes"; else enc="no"; fi
-        printf '%-11s %-10s %s\n' "$name" "$plain" "$enc"
+        if [ ! -f "$path.age" ]; then
+            enc="no"
+        elif [ ! -f "$path" ]; then
+            enc="yes"
+        else
+            case "$(compare_encrypted "$path")" in
+            same) enc="yes" ;;
+            differs) enc="STALE (run make secrets-encrypt)" ;;
+            *) enc="yes (unverified)" ;;
+            esac
+        fi
+        printf '%-19s %-10s %s\n' "$name" "$plain" "$enc"
     done
     echo ""
     echo "Only *.age files are committed. Plaintext is gitignored."
@@ -135,7 +181,7 @@ cmd_push() {
 
 cmd_help() {
     cat <<EOF
-Secrets (age) - encrypts: $MANAGED_FILES
+Secrets (age) - encrypts, under terraform/: $MANAGED_FILES
 
   make secrets-keygen
   make secrets-encrypt

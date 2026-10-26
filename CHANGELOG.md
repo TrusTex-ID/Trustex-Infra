@@ -4,6 +4,25 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Este proyecto versiona infraestructura, no una librería: los cambios se agrupan
 por revisión, y cada entrada dice qué se rompía antes y qué se rompe ahora.
 
+## [No publicado] — 2026-10-26
+
+### Añadido
+
+- **`terraform.tfvars` y `terraform.tfstate` se versionan cifrados.** Hasta
+  ahora solo existían en un portátil: perderlo era perder el estado de toda la
+  infraestructura. `scripts/secrets.*` cifra ahora con age esos dos ficheros
+  junto a `secrets/backend` y `secrets/postgres`, y el repo guarda
+  `terraform.tfvars.age` y `terraform.tfstate.age`. `make tf-apply` vuelve a
+  cifrar al terminar. No sustituye a un backend GCS: sigue sin haber bloqueo
+  concurrente (ver *Pendiente* más abajo).
+
+### Cambiado
+
+- **Los scripts de secretos comparan antes de actuar.** `encrypt` no reescribe
+  un `.age` sin cambios, `decrypt` no pisa una copia local distinta (un
+  `tfstate` posterior a un apply sin cifrar), `clean` solo borra lo que ya está
+  en su `.age` y `status` marca los `.age` desfasados como `STALE`.
+
 ## [No publicado] — 2026-09-04
 
 Revisión general de la configuración de Terraform. Se validó con

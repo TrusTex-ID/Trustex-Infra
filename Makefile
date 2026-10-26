@@ -1,10 +1,10 @@
 # Trustex infrastructure.
 #
-# Secrets:
+# Secrets (terraform/secrets/*, terraform.tfvars and terraform.tfstate):
 #   make secrets-keygen     # once: create age keypair
 #   make secrets-encrypt    # plaintext -> *.age (commit *.age)
 #   make secrets-decrypt    # *.age -> plaintext (needs .age.key)
-#   make secrets-clean      # remove plaintext, keep *.age
+#   make secrets-clean      # remove plaintext already captured in its *.age
 #   make secrets-status     # show what is encrypted / plaintext
 #   make secrets-push FILE=backend SECRET=name   # push to GCP Secret Manager
 #
@@ -100,8 +100,11 @@ tf-init:
 tf-plan:
 	$(TF) plan
 
+# Every apply rewrites terraform.tfstate, so the committed .age goes stale the
+# moment it succeeds. Re-encrypt straight away; commit the .age afterwards.
 tf-apply:
 	$(TF) apply
+	@$(SECRETS) encrypt
 
 tf-output:
 	$(TF) output
